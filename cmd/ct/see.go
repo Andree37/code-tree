@@ -21,7 +21,7 @@ const (
 	boxW   = 28 // outer width of a node box
 	boxH   = 5  // outer height
 	slotW  = boxW + 3
-	layerH = boxH + 2
+	layerH = boxH + 1 // the joining line runs in the one row between layers
 )
 
 type cell struct {
@@ -36,6 +36,7 @@ type seer struct {
 	pkgs     []string
 	pkg      string // package shown
 	pinned   bool   // the human picked a package; stop following
+	ox, oy   int    // scroll position of the graph
 	tree     string
 	g        *Graph
 	head     string
@@ -272,10 +273,10 @@ func (s *seer) layout() {
 		}
 	}
 	for id := range s.pos {
-		s.drawEdges(id)
-	}
-	for id := range s.pos {
 		s.drawBox(id)
+	}
+	for id := range s.pos { // after the boxes: lines join into their borders
+		s.drawEdges(id)
 	}
 }
 
@@ -316,9 +317,9 @@ func (s *seer) drawEdges(id string) {
 			edge = cOrange
 		}
 	}
-	s.put(pc, y, '│', edge)
+	s.put(pc, y-1, '┬', edge) // out of the parent's bottom border
 	for x := minc; x <= maxc; x++ {
-		s.put(x, y+1, '─', edge)
+		s.put(x, y, '─', edge)
 	}
 	for _, c := range kids {
 		cc := s.pos[c][0] + boxW/2
@@ -326,15 +327,16 @@ func (s *seer) drawEdges(id string) {
 		if hot(s.g.Info[c].State) {
 			col = cOrange
 		}
+		s.put(cc, y+1, '┴', col) // into the child's top border
 		switch {
 		case minc == maxc:
-			s.put(cc, y+1, '│', col)
+			s.put(cc, y, '│', col)
 		case cc == minc:
-			s.put(cc, y+1, '╭', col)
+			s.put(cc, y, '╭', col)
 		case cc == maxc:
-			s.put(cc, y+1, '╮', col)
+			s.put(cc, y, '╮', col)
 		default:
-			s.put(cc, y+1, '┬', col)
+			s.put(cc, y, '┬', col)
 		}
 	}
 	if minc != maxc {
@@ -352,7 +354,7 @@ func (s *seer) drawEdges(id string) {
 				j = '┼'
 			}
 		}
-		s.put(pc, y+1, j, edge)
+		s.put(pc, y, j, edge)
 	}
 }
 
@@ -393,39 +395,34 @@ func (s *seer) drawBox(id string) {
 	if f.State == "done" || f.State == "dropped" {
 		border = cDim
 	}
+	// the selected box gets a thick, bright frame so moving is obvious
+	tl, tr, bl, br, hz, vt := '╭', '╮', '╰', '╯', '─', '│'
 	if id == s.sel {
-		border = cBold
+		border = cBold + cWhite
+		tl, tr, bl, br, hz, vt = '┏', '┓', '┗', '┛', '━', '┃'
 	}
 	inner := boxW - 2
-	s.put(x, y, '╭', border)
-	s.put(x+boxW-1, y, '╮', border)
-	s.put(x, y+boxH-1, '╰', border)
-	s.put(x+boxW-1, y+boxH-1, '╯', border)
+	s.put(x, y, tl, border)
+	s.put(x+boxW-1, y, tr, border)
+	s.put(x, y+boxH-1, bl, border)
+	s.put(x+boxW-1, y+boxH-1, br, border)
 	for i := 1; i < boxW-1; i++ {
-		s.put(x+i, y, '─', border)
-		s.put(x+i, y+boxH-1, '─', border)
+		s.put(x+i, y, hz, border)
+		s.put(x+i, y+boxH-1, hz, border)
 	}
 	for j := 1; j < boxH-1; j++ {
-		s.put(x, y+j, '│', border)
-		s.put(x+boxW-1, y+j, '│', border)
+		s.put(x, y+j, vt, border)
+		s.put(x+boxW-1, y+j, vt, border)
 		s.text(x+1, y+j, strings.Repeat(" ", inner), "")
 	}
-	// an edge arriving from above
-	if len(f.Parents) > 0 {
-		col := cDim
-		if hot(f.State) {
-			col = cOrange
-		}
-		s.put(x+boxW/2, y, '┴', col)
+	kind := ""
+	if f.Kind == "head" {
+		kind = "SUBJECT"
 	}
-	kind := strings.ToUpper(f.Kind)
 	if id == s.st["current"] {
-		kind = "▶ " + kind
+		kind = "● Claude is here"
 	}
-	label := f.Label
-	if f.Kind == "thread" && f.State == "open" {
-		label = "Open"
-	}
+	label := plainLabel(f)
 	labelColor := cDim
 	switch f.State {
 	case "needs-you", "ready":
@@ -433,7 +430,11 @@ func (s *seer) drawBox(id string) {
 	case "done":
 		labelColor = cGreen
 	}
-	s.text(x+2, y+1, cut(kind, inner-visible(label)-3), cDim)
+	kindColor := cDim
+	if id == s.st["current"] {
+		kindColor = cBlue
+	}
+	s.text(x+2, y+1, cut(kind, inner-visible(label)-3), kindColor)
 	s.text(x+boxW-2-visible(label), y+1, label, labelColor)
 	titleColor := ""
 	if id == s.sel {
@@ -448,17 +449,14 @@ func (s *seer) render() {
 	var out []string
 	add := func(color, plain string) { out = append(out, color+cut(plain, s.w)+cReset) }
 
-	name := s.st["agent"]
-	state := "idle"
+	s.layout() // the selection is drawn into the boxes, so redraw on every key
+
+	state := "Claude is idle"
 	if s.st["busy"] != "" {
-		state = "working…"
+		state = "Claude is working…"
 	}
-	topic := ""
-	if s.head != "" {
-		topic = s.g.Nodes[s.head].Title + " in "
-	}
-	head := fmt.Sprintf(" %s%s · %d", topic, pkgName(s.root, s.pkg), len(s.pos))
-	right := fmt.Sprintf("following %s (%s)", name, state)
+	head := fmt.Sprintf(" What you and Claude discussed in %s/", pkgName(s.root, s.pkg))
+	right := state
 	pad := s.w - visible(head) - visible(right) - 1
 	if pad < 1 {
 		pad = 1
@@ -476,22 +474,34 @@ func (s *seer) render() {
 		return
 	}
 
-	graphH := s.h - len(out) - 4
+	graphH := s.h - len(out) - 5
 	if s.canvas == nil {
 		add(cDim, " Nothing here yet. The tree grows as you and Claude talk about this package.")
 	} else {
-		// keep the selected box in view, centred when the graph is bigger than the pane
+		// scroll only as far as needed to keep the picked box in view
 		sp := s.pos[s.sel]
 		W, H := len(s.canvas[0]), len(s.canvas)
-		ox, oy := 0, 0
 		if W > s.w {
-			ox = min(max(0, sp[0]+boxW/2-s.w/2), W-s.w)
+			if sp[0]-1 < s.ox {
+				s.ox = sp[0] - 1
+			} else if sp[0]+boxW+1 > s.ox+s.w {
+				s.ox = sp[0] + boxW + 1 - s.w
+			}
+			s.ox = min(max(0, s.ox), W-s.w)
 		} else {
-			ox = -(s.w - W) / 2
+			s.ox = -(s.w - W) / 2
 		}
 		if H > graphH {
-			oy = min(max(0, sp[1]+boxH/2-graphH/2), H-graphH)
+			if sp[1] < s.oy {
+				s.oy = sp[1]
+			} else if sp[1]+boxH > s.oy+graphH {
+				s.oy = sp[1] + boxH - graphH
+			}
+			s.oy = min(max(0, s.oy), H-graphH)
+		} else {
+			s.oy = 0
 		}
+		ox, oy := s.ox, s.oy
 		for row := 0; row < graphH; row++ {
 			y := oy + row
 			var b strings.Builder
@@ -511,19 +521,22 @@ func (s *seer) render() {
 			out = append(out, b.String()+cReset)
 		}
 	}
-	for len(out) < s.h-3 {
+	for len(out) < s.h-4 {
 		out = append(out, "")
 	}
 	add(cDim, strings.Repeat("─", s.w))
 	if n := s.g.Nodes[s.sel]; n != nil {
-		add("", " "+cut(n.Title+" · "+s.g.Info[s.sel].Label+" · "+n.Outcome, s.w-2))
+		f := s.g.Info[s.sel]
+		add(cBold, " "+n.Title+cReset+cDim+"  "+plainMeaning(f))
+		add("", " "+cut(n.Outcome, s.w-2))
 	} else {
+		add("", "")
 		add("", "")
 	}
 	if s.inputOn {
 		add(cOrange, " "+s.prompt+" › "+string(s.input)+"▏")
 	} else {
-		add(cDim, " ←↑↓→ move · t talk · s switch Claude here · enter details · o topic · p package · b browser · q   "+s.msg)
+		add(cDim, " arrows: pick a box · enter: read it · t: ask Claude about it · g: tell Claude to go back to it · ?: help · q: close   "+s.msg)
 	}
 	s.flush(out)
 }
@@ -598,7 +611,7 @@ func (s *seer) key(k string) bool {
 		s.ask("talk to "+s.st["agent"]+" about “"+title+"”", func(t string) {
 			s.send(fmt.Sprintf("[code-tree · %s · %s · %s]\n%s", pkgName(s.root, s.pkg), id, title, t))
 		})
-	case "s":
+	case "g", "s":
 		n := s.g.Nodes[s.sel]
 		s.send(fmt.Sprintf("[code-tree · %s · %s] Let's switch to the thread “%s” in %s. Where it stands: %s Pick it up from there.",
 			pkgName(s.root, s.pkg), s.sel, n.Title, pkgName(s.root, s.pkg), n.Outcome))
@@ -631,16 +644,26 @@ func (s *seer) key(k string) bool {
 		s.browser()
 	case "?":
 		s.overlay = []string{
-			"code-tree · keys", "",
-			"  ← → ↑ ↓     move between threads (h j k l too)",
-			"  enter       what the thread is about and how it went",
-			"  t           talk to Claude about this thread",
-			"  s           switch Claude to this thread",
-			"  o           next topic in this package",
-			"  p           next package",
-			"  f           follow Claude again (after o or p)",
-			"  b           open this graph in the browser",
-			"  q / esc     close", "",
+			cBold + "What is this?" + cReset,
+			"  A map of what you and Claude have talked about while working in this code folder.",
+			"  It updates by itself after every Claude reply.",
+			"",
+			"  The top box is the SUBJECT. Each box under it is one point you went into.",
+			"  Orange \"Waiting for you\": Claude asked you something there.",
+			"  \"Settled\": that point was decided.   \"● Claude is here\": what Claude is on now.",
+			"",
+			cBold + "Keys" + cReset,
+			"  arrows      pick a box (the thick frame is the one picked)",
+			"  enter       read what happened in that box",
+			"  t           type a message to Claude about that box; it lands in your Claude chat",
+			"  g           ask Claude to go back to that box and continue it",
+			"",
+			"  o           show the next subject in this folder (if there are several)",
+			"  p           show another code folder you worked in",
+			"  f           follow Claude again after o or p",
+			"  b           open the same map in your web browser",
+			"  q / esc     close",
+			"",
 			"any key closes this",
 		}
 	}
@@ -654,16 +677,19 @@ func abs(x int) int {
 	return x
 }
 
-// sideways moves to the nearest box on the same row.
+// sideways moves to the nearest box in that direction, preferring the same row.
 func (s *seer) sideways(dir int) {
 	cur := s.pos[s.sel]
 	best, bd := "", 1<<30
 	for id, p := range s.pos {
-		if p[1] != cur[1] || id == s.sel {
+		if id == s.sel {
 			continue
 		}
-		d := (p[0] - cur[0]) * dir
-		if d > 0 && d < bd {
+		dx := (p[0] - cur[0]) * dir
+		if dx <= 0 {
+			continue
+		}
+		if d := dx + 4*abs(p[1]-cur[1]); d < bd {
 			best, bd = id, d
 		}
 	}
@@ -730,4 +756,37 @@ func (s *seer) browser() {
 	}
 	s.serve = cmd
 	s.msg = "opened in the browser"
+}
+
+const cWhite = "\x1b[97m"
+
+// plainLabel is a box's state in everyday words.
+func plainLabel(f *Info) string {
+	switch f.State {
+	case "needs-you":
+		return "Waiting for you"
+	case "ready":
+		return "Settled"
+	case "done":
+		return "Done"
+	case "open", "working":
+		return "In progress"
+	case "waiting":
+		var done, all int
+		fmt.Sscanf(f.Label, "Waiting %d/%d", &done, &all)
+		return fmt.Sprintf("%d of %d settled", done, all)
+	}
+	return f.Label
+}
+
+func plainMeaning(f *Info) string {
+	switch f.State {
+	case "needs-you":
+		return "Claude asked you something here and is waiting for your answer."
+	case "ready", "done":
+		return "This was settled."
+	case "waiting":
+		return "Some points under it are still open."
+	}
+	return "Still being discussed."
 }
