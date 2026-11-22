@@ -79,6 +79,40 @@ at a time, like the tree above) and **Tracker** (a board with one column per sta
 The author on log lines comes from `--by`, then `$CT_AGENT`, then `human`. Give each agent its own
 `CT_AGENT` so the log shows who did what.
 
+## Steering: agents propose, you decide
+
+- **Proposals.** Nodes an agent adds (`--by` / `$CT_AGENT` is not `human`) start as **Proposed** and
+  can't be claimed until you `ct accept` them. You can also `ct reject ID "why"` or
+  `ct merge ID INTO`. Set `approve = none` in `.tree/config` to turn this off.
+- **Checks.** `ct add ... --check "zig build test -Dfilter=maps"` or `ct check ID --set "..."`.
+  `ct ready` / `ct done` run the check in the code repo and refuse if it fails (`--skip-check` is logged).
+  Discuss nodes can only close with the decision as `--outcome`.
+- **Decisions flow down.** `ct answer ID "..."` answers a Needs you node; `ct decide ID "..."` sets a
+  rule anywhere. Both hold for that node and everything below it: `ct show` lists them as
+  *Decisions in force* and agents are told to follow them.
+
+```sh
+ct next --for human               # needs you, proposed, stale, ready
+ct accept pick-flat-output        # or: ct reject ID "too big" / ct merge ID OTHER
+ct answer recursive-case "flat binders; recursion later"
+ct decide maps "no allocations in the match path"
+ct check map-impl --set "zig build test -Dfilter=map"
+```
+
+## From the browser: actions and chats
+
+`ct serve` turns the page into a control panel. The side panel of a node offers the actions that fit
+its state (answer, accept / reject, accept as done / send back, still holds / reopen, add decision,
+add sub-task, note, drop) and a **chat** with an agent about that node.
+
+- The agent is `chat =` in `.tree/config`, run in the code repo with the prompt on stdin. The default is
+  `claude -p --allowedTools "Read,Grep,Glob,Bash(ct:*)"`, so it can read code and update the tree, and
+  anything it adds arrives as Proposed. Any agent CLI that reads stdin works.
+- Chats are plain text in `.tree/chats/<id>.md`. From the terminal: `ct chat ID "message"`, or `ct chat ID` to read.
+- The server only listens on 127.0.0.1, and writes need a random per-run token that only the served page
+  has. Actions run fixed `ct` commands, never a shell.
+- Open a node directly with `http://127.0.0.1:7337/#<id>`.
+
 ## Keeping up with the code
 
 The tree never touches your code repo: no hooks, no commit trailers, no files in it. It only reads git
