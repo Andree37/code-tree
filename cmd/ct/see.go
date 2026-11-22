@@ -768,7 +768,7 @@ func plainLabel(f *Info) string {
 	case "ready":
 		return "Settled"
 	case "done":
-		return "Done"
+		return "Settled"
 	case "open", "working":
 		return "In progress"
 	case "waiting":

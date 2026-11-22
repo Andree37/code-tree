@@ -363,7 +363,7 @@ parent: <for a new thread: id of the thread or HEAD it branches from, or new-top
 topic: <only when parent is new-topic: 3 to 7 words naming the new topic>
 title: <3 to 7 words naming the thread>
 status: <open | needs-you | ready>
-summary: <one short sentence: where this thread stands now>
+summary: <one short sentence: where this thread stands now; for needs-you, the exact question the agent asked>
 close: <ids of other threads this turn settled, comma separated, or none>
 
 Rules:
@@ -479,14 +479,17 @@ func apply(tree, agent string, p placement) string {
 		n = newNode(g, title, agent, []string{parent})
 	}
 	n.Status = p.status
+	if n.Status == "ready" { // a settled point counts as done, so "k of n settled" adds up
+		n.Status = "done"
+	}
 	if p.summary != "" {
 		n.Outcome = p.summary
 	}
 	appendLog(n, p.status+": "+p.summary, agent)
 	changed = append(changed, n)
 	for _, c := range p.close {
-		if cn := g.Nodes[c]; cn != nil && c != n.ID && g.Info[c] != nil && g.Info[c].Kind != "head" && cn.Status != "ready" {
-			cn.Status = "ready"
+		if cn := g.Nodes[c]; cn != nil && c != n.ID && g.Info[c] != nil && g.Info[c].Kind != "head" && cn.Status != "done" {
+			cn.Status = "done"
 			appendLog(cn, "settled", agent)
 			changed = append(changed, cn)
 		}
