@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Tree</title>
+<style>
+:root {
+  --bg: #0b0b0b; --panel: #141414; --card: #161616; --line: #2a2a2a; --text: #ececec;
+  --muted: #8a8a8a; --chip: #262626; --accent: #ff6a00; --dot: #1d1d1d; --done: #3ba55c;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f6f5f3; --panel: #ffffff; --card: #ffffff; --line: #d9d6d0; --text: #1b1b1b;
+    --muted: #6d6a66; --chip: #eeebe6; --accent: #e85d00; --dot: #e4e1db; --done: #2f8a4c;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
+header { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+header h1 { font-size: 16px; margin: 0 12px 0 0; }
+select { flex: 1; min-width: 0; background: var(--panel); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 10px; padding: 8px 12px; font: inherit; font-weight: 600; }
+.stat { color: var(--muted); white-space: nowrap; }
+.stat b { color: var(--accent); }
+button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font: inherit; cursor: pointer; }
+#wrap { position: absolute; top: 55px; left: 0; right: 0; bottom: 0; overflow: hidden; cursor: grab;
+  background-image: radial-gradient(var(--dot) 1px, transparent 1px); background-size: 18px 18px; }
+#wrap.drag { cursor: grabbing; }
+#stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+path { fill: none; stroke: var(--line); stroke-width: 1.5; }
+path.hot { stroke: var(--accent); stroke-width: 2; }
+.node { position: absolute; width: 264px; height: 106px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 11px; display: flex; flex-direction: column; cursor: pointer; }
+.node:hover { border-color: var(--muted); }
+.node.hot { border: 1.5px solid var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.node.resolved { opacity: .5; }
+.node.sel { outline: 2px solid var(--text); outline-offset: 2px; }
+.top { display: flex; justify-content: space-between; align-items: center; }
+.kind { font-size: 10.5px; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+.chip { background: var(--chip); color: var(--muted); border-radius: 7px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
+.chip.done { color: var(--done); }
+.title { font-weight: 600; margin-top: 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.foot { margin-top: auto; display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
+.unb { color: var(--accent); font-weight: 700; }
+aside { position: absolute; top: 55px; right: 0; bottom: 0; width: min(440px, 100%); background: var(--panel);
+  border-left: 1px solid var(--line); padding: 16px; overflow: auto; display: none; }
+aside.open { display: block; }
+aside h2 { font-size: 16px; margin: 6px 0 4px; }
+aside .meta { color: var(--muted); margin-bottom: 10px; }
+aside pre { white-space: pre-wrap; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+aside code { font: 12px ui-monospace, Menlo, monospace; }
+aside a { color: var(--accent); cursor: pointer; }
+aside ul { padding-left: 18px; margin: 4px 0 10px; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
+nav { display: flex; gap: 4px; }
+nav button { border: none; background: none; color: var(--muted); font-weight: 600; border-radius: 999px; padding: 7px 12px; }
+nav button.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+nav .badge { background: var(--accent); color: #fff; border-radius: 999px; font-size: 10.5px; padding: 1px 6px; margin-right: 5px; }
+#list { position: absolute; top: 55px; left: 0; right: 0; bottom: 0; overflow: auto; padding: 16px; display: none; }
+#list.on { display: block; }
+.rows { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+.row { display: grid; grid-template-columns: 96px 1fr auto; gap: 12px; align-items: center; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+.row.hot { border-color: var(--accent); }
+.row small, .card small { color: var(--muted); }
+.group { color: var(--muted); font-weight: 600; margin: 14px 0 2px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.board { display: flex; gap: 12px; align-items: flex-start; min-width: max-content; }
+.col { width: 260px; flex: none; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.col h3 { margin: 0 0 8px; font-size: 12px; display: flex; justify-content: space-between; color: var(--muted); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px; margin-bottom: 8px; cursor: pointer; }
+.card.hot { border-color: var(--accent); }
+.card .t { font-weight: 600; margin-bottom: 4px; }
+@media (max-width: 640px) { header h1, .stat { display: none; } .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <nav>
+    <button data-tab="next"><span class="badge" id="b-next"></span>Next</button>
+    <button data-tab="graph"><span class="badge" id="b-graph"></span>Graph</button>
+    <button data-tab="tracker">Tracker</button>
+  </nav>
+  <select id="head"></select>
+  <span class="stat" id="stats"></span>
+  <button id="fit" title="fit to screen">Fit</button>
+</header>
+<div id="wrap"><div id="stage"><svg id="edges"></svg></div></div>
+<div id="list"></div>
+<aside id="side"></aside>
+<script>
+let DATA = __DATA__;
+const W = 264, H = 106, GX = 38, GY = 80;
+const $ = (s) => document.querySelector(s);
+const wrap = $("#wrap"), stage = $("#stage"), svg = $("#edges"), side = $("#side"), sel = $("#head");
+let view = { x: 0, y: 0, k: 1 }, selected = null, fitted = false;
+let tab = "graph";
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+
+const byId = () => Object.fromEntries(DATA.nodes.map((n) => [n.id, n]));
+const HOT = new Set(["needs-you", "ready"]);
+const RES = new Set(["done", "dropped"]);
+
+function subgraph(head, idx) {
+  const seen = new Set([head]), st = [head];
+  while (st.length) for (const c of idx[st.pop()].waits_on) if (!seen.has(c)) { seen.add(c); st.push(c); }
+  return seen;
+}
+
+function layout(head, idx) {
+  const ids = subgraph(head, idx), depth = { [head]: 0 };
+  // longest-path layering (Kahn over edges inside the subgraph)
+  const indeg = {}; ids.forEach((i) => (indeg[i] = 0));
+  ids.forEach((i) => idx[i].waits_on.forEach((c) => ids.has(c) && indeg[c]++));
+  const q = [...ids].filter((i) => !indeg[i]);
+  while (q.length) {
+    const i = q.shift();
+    for (const c of idx[i].waits_on) if (ids.has(c)) {
+      depth[c] = Math.max(depth[c] ?? 0, (depth[i] ?? 0) + 1);
+      if (!--indeg[c]) q.push(c);
+    }
+  }
+  const layers = [];
+  ids.forEach((i) => (layers[depth[i]] ??= []).push(i));
+  const order = {};
+  layers.forEach((L, d) => {
+    L.sort((a, b) => bary(a) - bary(b) || idx[a].created.localeCompare(idx[b].created) || a.localeCompare(b));
+    L.forEach((i, k) => (order[i] = k));
+    function bary(i) {
+      const ps = idx[i].blocks.filter((p) => ids.has(p) && depth[p] < d);
+      if (!ps.length) return 0;
+      return ps.reduce((s, p) => s + order[p] - (layers[depth[p]].length - 1) / 2 + idx[p].waits_on.indexOf(i) / 100, 0) / ps.length;
+    }
+  });
+  // place each layer under its parents' barycenter, then push apart overlaps
+  const pos = {};
+  layers.forEach((L, d) => {
+    const want = L.map((i) => {
+      const ps = idx[i].blocks.filter((p) => pos[p]);
+      return ps.length ? ps.reduce((s, p) => s + pos[p].x, 0) / ps.length : 0;
+    });
+    const xs = [];
+    L.forEach((i, k) => (xs[k] = k ? Math.max(want[k], xs[k - 1] + W + GX) : want[k]));
+    const shift = want.reduce((a, b) => a + b, 0) / L.length - xs.reduce((a, b) => a + b, 0) / L.length;
+    L.forEach((i, k) => (pos[i] = { x: xs[k] + shift, y: d * (H + GY) }));
+  });
+  return { ids, pos };
+}
+
+function render() {
+  const idx = byId();
+  const active = DATA.nodes.filter((n) => !RES.has(n.state));
+  const nxt = actionableList();
+  $("#b-next").textContent = nxt.length; $("#b-next").style.display = nxt.length ? "" : "none";
+  $("#b-graph").textContent = active.length; $("#b-graph").style.display = active.length ? "" : "none";
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  const isGraph = tab === "graph";
+  wrap.style.display = isGraph ? "" : "none"; sel.style.visibility = isGraph ? "" : "hidden"; $("#fit").style.display = isGraph ? "" : "none";
+  $("#list").classList.toggle("on", !isGraph);
+  if (isGraph) renderGraph(idx); else renderList(idx);
+  if (selected) open(selected, true);
+}
+
+const RANK = { "needs-you": 0, ready: 1, open: 2 };
+function actionableList() {
+  return DATA.nodes.filter((n) => n.state in RANK)
+    .sort((a, b) => RANK[a.state] - RANK[b.state] || b.unblocks - a.unblocks || a.created.localeCompare(b.created));
+}
+
+function headTitle(n, idx) { return n.heads.map((h) => idx[h]?.title).filter(Boolean).join(", "); }
+
+function renderList(idx) {
+  const L = $("#list"); L.innerHTML = "";
+  const click = (el, id) => { el.onclick = (e) => { e.stopPropagation(); open(id); }; };
+  if (tab === "next") {
+    const rows = document.createElement("div"); rows.className = "rows";
+    const groups = [["needs-you", "Needs you"], ["ready", "Ready for review"], ["open", "Open for agents"]];
+    const items = actionableList();
+    if (!items.length) rows.innerHTML = '<p class="group">Nothing actionable.</p>';
+    for (const [st, name] of groups) {
+      const g = items.filter((n) => n.state === st);
+      if (!g.length) continue;
+      const h = document.createElement("div"); h.className = "group"; h.textContent = `${name} · ${g.length}`; rows.appendChild(h);
+      for (const n of g) {
+        const r = document.createElement("div"); r.className = "row" + (HOT.has(n.state) ? " hot" : "");
+        r.innerHTML = `<span class="chip"></span><div><div class="t"></div><small></small></div><span class="unb"></span>`;
+        r.querySelector(".chip").textContent = n.label;
+        r.querySelector(".t").textContent = n.title;
+        r.querySelector("small").textContent = [headTitle(n, idx), n.mode, n.agent].filter(Boolean).join(" · ");
+        if (n.unblocks) r.querySelector(".unb").textContent = `unblocks ${n.unblocks}`;
+        click(r, n.id); rows.appendChild(r);
+      }
+    }
+    L.appendChild(rows);
+  } else {
+    const cols = [["needs-you", "Needs you"], ["ready", "Ready"], ["working", "Working"], ["open", "Open"], ["waiting", "Waiting"], ["done", "Done"]];
+    const board = document.createElement("div"); board.className = "board";
+    for (const [st, name] of cols) {
+      const g = DATA.nodes.filter((n) => (st === "done" ? RES.has(n.state) : n.state === st))
+        .sort((a, b) => b.unblocks - a.unblocks || b.updated.localeCompare(a.updated));
+      const c = document.createElement("div"); c.className = "col";
+      c.innerHTML = `<h3><span>${name}</span><span>${g.length}</span></h3>`;
+      for (const n of g) {
+        const k = document.createElement("div"); k.className = "card" + (HOT.has(n.state) ? " hot" : "");
+        k.innerHTML = `<div class="t"></div><small></small>`;
+        k.querySelector(".t").textContent = n.title;
+        k.querySelector("small").textContent = [n.kind === "head" ? "HEAD" : headTitle(n, idx), n.agent, n.state === "waiting" ? n.label : "", n.unblocks && !RES.has(n.state) ? `unblocks ${n.unblocks}` : ""].filter(Boolean).join(" · ");
+        click(k, n.id); c.appendChild(k);
+      }
+      board.appendChild(c);
+    }
+    L.appendChild(board);
+  }
+}
+
+function renderGraph(idx) {
+  const heads = DATA.nodes.filter((n) => n.kind === "head")
+    .sort((a, b) => (RES.has(a.status) - RES.has(b.status)) || a.created.localeCompare(b.created));
+  const cur = sel.value || store.get("ct.head");
+  sel.innerHTML = "";
+  for (const h of heads) {
+    const o = document.createElement("option");
+    o.value = h.id; o.textContent = `${h.title} · ${subgraph(h.id, idx).size}`;
+    sel.appendChild(o);
+  }
+  if (cur && idx[cur]?.kind === "head") sel.value = cur;
+  stage.querySelectorAll(".node, .empty").forEach((e) => e.remove());
+  svg.innerHTML = "";
+  document.querySelector(".empty")?.remove();
+
+  const cnt = (s) => DATA.nodes.filter((n) => n.state === s).length;
+  $("#stats").innerHTML = `<b>${cnt("needs-you")}</b> needs you · <b>${cnt("ready")}</b> ready · ${cnt("open")} open · ${cnt("working")} working`;
+
+  if (!heads.length) {
+    const e = document.createElement("div"); e.className = "empty";
+    e.textContent = 'No nodes yet. Run: ct add "your goal"'; wrap.appendChild(e); return;
+  }
+  const { ids, pos } = layout(sel.value, idx);
+  const minX = Math.min(...[...ids].map((i) => pos[i].x));
+  for (const i of ids) pos[i].x -= minX - 40, pos[i].y += 40;
+
+  let paths = "";
+  for (const i of ids) for (const c of idx[i].waits_on) if (ids.has(c)) {
+    const a = pos[i], b = pos[c], x1 = a.x + W / 2, y1 = a.y + H, x2 = b.x + W / 2, y2 = b.y, my = (y1 + y2) / 2;
+    const hot = HOT.has(idx[c].state) ? "hot" : "";
+    paths += `<path class="${hot}" d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}"/>`;
+  }
+  svg.innerHTML = paths;
+
+  for (const i of ids) {
+    const n = idx[i], d = document.createElement("div");
+    d.className = "node" + (HOT.has(n.state) ? " hot" : "") + (RES.has(n.state) ? " resolved" : "") + (selected === i ? " sel" : "");
+    d.style.left = pos[i].x + "px"; d.style.top = pos[i].y + "px";
+    d.innerHTML = `<div class="top"><span class="kind"></span><span class="chip"></span></div>
+      <div class="title"></div><div class="foot"><span class="ma"></span><span class="unb"></span></div>`;
+    d.querySelector(".kind").textContent = n.kind.toUpperCase();
+    const chip = d.querySelector(".chip"); chip.textContent = n.label; if (n.state === "done") chip.classList.add("done");
+    d.querySelector(".title").textContent = n.title;
+    d.querySelector(".ma").textContent = [n.mode, n.agent].filter(Boolean).join(" · ");
+    if (n.unblocks && !RES.has(n.state)) d.querySelector(".unb").textContent = `unblocks ${n.unblocks}`;
+    d.onclick = (e) => { e.stopPropagation(); open(i); };
+    d.onmousedown = (e) => e.stopPropagation();
+    stage.appendChild(d);
+  }
+  if (!fitted) { fit(ids, pos); fitted = true; }
+  apply();
+}
+
+function fit(ids, pos) {
+  if (!ids) { const idx = byId(); ({ ids, pos } = layout(sel.value, idx)); }
+  const xs = [...ids].map((i) => pos[i].x), ys = [...ids].map((i) => pos[i].y);
+  const w = Math.max(...xs) - Math.min(...xs) + W + 80, h = Math.max(...ys) - Math.min(...ys) + H + 80;
+  const k = Math.min(1.2, wrap.clientWidth / w, wrap.clientHeight / h);
+  view = { k, x: (wrap.clientWidth - w * k) / 2, y: Math.max(0, (wrap.clientHeight - h * k) / 2) };
+  apply();
+}
+const apply = () => (stage.style.transform = `translate(${view.x}px,${view.y}px) scale(${view.k})`);
+
+function open(i, keep) {
+  const idx = byId(), n = idx[i];
+  if (!n) { side.classList.remove("open"); selected = null; return; }
+  selected = i;
+  if (!keep && n.heads.length && !n.heads.includes(sel.value)) {
+    sel.value = n.heads[0]; store.set("ct.head", n.heads[0]); fitted = false;
+  }
+  if (!keep) stage.querySelectorAll(".node").forEach((e) => e.classList.remove("sel")), render();
+  const link = (id) => `<a data-id="${id}">${esc(idx[id]?.title ?? id)}</a> <span class="chip">${esc(idx[id]?.label ?? "")}</span>`;
+  side.innerHTML = `
+    <button id="close" style="float:right">✕</button>
+    <span class="kind">${n.kind.toUpperCase()}</span>
+    <h2>${esc(n.title)}</h2>
+    <div class="meta"><span class="chip">${esc(n.label)}</span> · <code>${esc(n.id)}</code>${n.unblocks ? ` · unblocks ${n.unblocks}` : ""}
+      ${n.mode || n.agent ? `<br>${esc([n.mode, n.agent].filter(Boolean).join(" · "))}` : ""}</div>
+    ${n.outcome ? `<p><b>Outcome:</b> ${esc(n.outcome)}</p>` : ""}
+    ${n.blocks.length ? `<b>Blocks</b><ul>${n.blocks.map((b) => `<li>${link(b)}</li>`).join("")}</ul>` : ""}
+    ${n.waits_on.length ? `<b>Waits on</b><ul>${n.waits_on.map((b) => `<li>${link(b)}${idx[b]?.outcome ? `<br><small>⇒ ${esc(idx[b].outcome)}</small>` : ""}</li>`).join("")}</ul>` : ""}
+    <pre>${esc((n.body || "").trim())}</pre>
+    <p class="meta">Agents: <code>ct show ${esc(n.id)}</code></p>`;
+  side.classList.add("open");
+  side.querySelector("#close").onclick = () => { selected = null; side.classList.remove("open"); render(); };
+  side.querySelectorAll("a[data-id]").forEach((a) => (a.onclick = () => {
+    const t = a.dataset.id, h = idx[t].heads.includes(sel.value) ? sel.value : idx[t].heads[0];
+    if (h !== sel.value) { sel.value = h; store.set("ct.head", h); fitted = false; }
+    open(t);
+  }));
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+sel.onchange = () => { store.set("ct.head", sel.value); fitted = false; selected = null; side.classList.remove("open"); render(); };
+$("#fit").onclick = () => fit();
+let drag = null;
+wrap.onmousedown = (e) => { drag = { x: e.clientX - view.x, y: e.clientY - view.y }; wrap.classList.add("drag"); };
+window.onmousemove = (e) => { if (drag) { view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; apply(); } };
+window.onmouseup = () => { drag = null; wrap.classList.remove("drag"); };
+wrap.onwheel = (e) => {
+  e.preventDefault();
+  const r = wrap.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  const k = Math.min(2.5, Math.max(0.2, view.k * Math.exp(-e.deltaY * 0.0015)));
+  view.x = mx - (mx - view.x) * (k / view.k); view.y = my - (my - view.y) * (k / view.k); view.k = k; apply();
+};
+wrap.onclick = () => { if (selected) { selected = null; side.classList.remove("open"); render(); } };
+document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => {
+  tab = b.dataset.tab; store.set("ct.tab", tab); if (tab === "graph") fitted = false; render();
+}));
+tab = store.get("ct.tab") || "graph";
+$("#list").onclick = () => { if (selected) { selected = null; side.classList.remove("open"); } };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") wrap.onclick(); if (e.key === "f") fit(); });
+
+render();
+if (location.protocol.startsWith("http")) {
+  setInterval(async () => {
+    try {
+      const d = await (await fetch("graph.json", { cache: "no-store" })).json();
+      if (JSON.stringify(d.nodes) !== JSON.stringify(DATA.nodes)) { DATA = d; render(); }
+    } catch {}
+  }, 1500);
+}
+</script>
+</body>
+</html>
