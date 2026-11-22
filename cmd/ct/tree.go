@@ -44,6 +44,8 @@ type Node struct {
 	Touches                                                   []string          // code paths/patterns this node owns
 	Stale                                                     []string          // paths changed since it was resolved
 	At, Base                                                  string            // code commit at resolution / at claim
+	Check                                                     string            // shell command that must pass before ready/done
+	Decisions                                                 []string          // constraints that hold for this node and everything below
 	Extra                                                     map[string]string // unknown fields, kept verbatim
 	Body                                                      string
 }
@@ -149,6 +151,10 @@ func parseNode(text, path string) *Node {
 			n.At = str
 		case "base":
 			n.Base = str
+		case "check":
+			n.Check = str
+		case "decision":
+			n.Decisions = append(n.Decisions, str)
 		case "blocks", "touches", "stale":
 			list := splitList(v)
 			switch k {
@@ -211,6 +217,12 @@ func dumpNode(n *Node) string {
 	}
 	if len(n.Stale) > 0 {
 		fmt.Fprintf(&b, "stale: %s\n", strings.Join(n.Stale, ", "))
+	}
+	if n.Check != "" {
+		fmt.Fprintf(&b, "check: %s\n", n.Check)
+	}
+	for _, d := range n.Decisions {
+		fmt.Fprintf(&b, "decision: %s\n", d)
 	}
 	if n.Base != "" {
 		fmt.Fprintf(&b, "base: %s\n", n.Base)
@@ -388,6 +400,26 @@ func (g *Graph) compute() {
 	}
 }
 
+// decisionsInForce lists decisions on a node and everything above it, nearest first.
+func (g *Graph) decisionsInForce(i string) [][2]string {
+	var out [][2]string
+	seen := map[string]bool{}
+	queue := []string{i}
+	for len(queue) > 0 {
+		c := queue[0]
+		queue = queue[1:]
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		for _, d := range g.Nodes[c].Decisions {
+			out = append(out, [2]string{c, d})
+		}
+		queue = append(queue, g.Info[c].Parents...)
+	}
+	return out
+}
+
 func (g *Graph) descendants(i string) map[string]bool {
 	seen := map[string]bool{}
 	stack := append([]string{}, g.Info[i].Children...)
@@ -482,9 +514,12 @@ func (g *Graph) dump() string {
 			{"created", n.Created}, {"updated", n.Updated}, {"unblocks", fmt.Sprint(f.Unblocks)},
 			{"blocks", strings.Join(f.Parents, "\t")}, {"waits_on", strings.Join(f.Children, "\t")},
 			{"heads", strings.Join(g.headsOf(i), "\t")}, {"touches", strings.Join(n.Touches, "\t")},
-			{"stale", strings.Join(n.Stale, "\t")},
+			{"stale", strings.Join(n.Stale, "\t")}, {"check", n.Check},
 		} {
 			fmt.Fprintf(&b, "%s %s\n", kv[0], kv[1])
+		}
+		for _, d := range n.Decisions {
+			fmt.Fprintf(&b, "decision %s\n", d)
 		}
 		for _, line := range strings.Split(strings.TrimRight(n.Body, "\n"), "\n") {
 			fmt.Fprintf(&b, "body %s\n", line)

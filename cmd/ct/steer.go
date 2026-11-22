@@ -3,8 +3,11 @@ package main
 // Steering: agents propose, humans decide.
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 )
 
 func cmdAccept(a *Args) {
@@ -86,3 +89,91 @@ func section(body, heading string) string {
 	}
 	return rest
 }
+
+// runCheck runs a node's check in the code repo and returns (passed, output).
+func runCheck(g *Graph, n *Node) (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", n.Check)
+	cmd.Dir = loadConfig(g.Dir).Code
+	out, err := cmd.CombinedOutput()
+	return err == nil, string(out)
+}
+
+func lastLines(s string, k int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > k {
+		lines = lines[len(lines)-k:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func cmdCheck(a *Args) {
+	need(a, 1, "check")
+	g := load(requireTree())
+	i := g.resolve(a.Pos[0])
+	n := g.Nodes[i]
+	switch {
+	case a.Bool("clear"):
+		n.Check = ""
+		appendLog(n, "check removed", who(a))
+		g.mutate(n)
+		return
+	case a.Has("set"):
+		n.Check = oneLine(a.Get("set", ""))
+		appendLog(n, "check set: "+n.Check, who(a))
+		g.mutate(n)
+	}
+	if n.Check == "" {
+		die("%s has no check (set one with --set \"cmd\")", i)
+	}
+	ok, out := runCheck(g, n)
+	if out != "" {
+		fmt.Println(lastLines(out, 15))
+	}
+	if !ok {
+		die("check failed: %s", n.Check)
+	}
+	fmt.Println("check passed:", n.Check)
+}
+
+// runStaleChecks re-runs checks of stale nodes: pass clears stale, fail reopens.
+func runStaleChecks(g *Graph, head string) []*Node {
+	var changed []*Node
+	for _, i := range g.IDs {
+		n := g.Nodes[i]
+		if len(n.Stale) == 0 || n.Check == "" {
+			continue
+		}
+		ok, out := runCheck(g, n)
+		if ok {
+			appendLog(n, "check passed after changes to "+strings.Join(n.Stale, ", ")+"; no longer stale", "ct sync")
+			n.Stale, n.At = nil, head
+			fmt.Printf("  check ok %s\n", i)
+		} else {
+			appendLog(n, "check failed after changes to "+strings.Join(n.Stale, ", ")+"; reopened: "+oneLine(lastLines(out, 3)), "ct sync")
+			n.Status, n.Stale = "open", nil
+			fmt.Printf("  check FAILED %s, reopened\n", i)
+		}
+		changed = append(changed, n)
+	}
+	return changed
+}
+
+func addDecision(a *Args, cmd, prefix string) {
+	need(a, 2, cmd)
+	g := load(requireTree())
+	i := g.resolve(a.Pos[0])
+	n := g.Nodes[i]
+	d := oneLine(strings.Join(a.Pos[1:], " "))
+	n.Decisions = append(n.Decisions, d)
+	if cmd == "answer" && n.Status == "needs-you" {
+		n.Status = "open"
+	}
+	appendLog(n, prefix+d, who(a))
+	g.mutate(n)
+	fmt.Printf("%s: %s · decision recorded for it and everything below\n", i, label(n.Status))
+}
+
+func cmdAnswer(a *Args) { addDecision(a, "answer", "ANSWER: ") }
+func cmdDecide(a *Args) { addDecision(a, "decide", "DECISION: ") }

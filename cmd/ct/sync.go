@@ -344,6 +344,14 @@ func cmdSync(a *Args) {
 	}
 
 	report := func(changedNodes int) {
+		if a.Bool("run-checks") && !dry {
+			if ch := runStaleChecks(g, head); len(ch) > 0 {
+				for _, n := range ch {
+					g.save(n)
+				}
+				writeGraphMD(dir)
+			}
+		}
 		stale := 0
 		for _, i := range g.IDs {
 			if len(g.Nodes[i].Stale) > 0 {

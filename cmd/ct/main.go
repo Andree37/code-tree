@@ -120,6 +120,7 @@ func init() {
 			{"agent", "a", true, "assigned agent or person"},
 			{"status", "s", true, "initial status (default open)"},
 			fTouches,
+			{"check", "", true, "shell command that must pass before ready/done (runs in the code repo)"},
 			fBy,
 		}, cmdAdd},
 		{"ls", "[HEAD]", "print the tree(s)", []flagSpec{{"all", "", false, "include resolved nodes and heads"}}, cmdLs},
@@ -139,6 +140,13 @@ func init() {
 		{"accept", "ID", "accept a proposed node (it becomes open)", []flagSpec{fNote, fBy}, cmdAccept},
 		{"reject", "ID [REASON]", "reject a proposed node (it becomes dropped)", []flagSpec{fBy}, cmdReject},
 		{"merge", "ID INTO", "fold a node into another one and drop it", []flagSpec{fBy}, cmdMerge},
+		{"check", "ID", "run a node's check now (or set it)", []flagSpec{
+			{"set", "", true, "set the check command"},
+			{"clear", "", false, "remove the check"},
+			fBy,
+		}, cmdCheck},
+		{"answer", "ID TEXT", "answer a needs-you node; the answer becomes a decision for it and everything below", []flagSpec{fBy}, cmdAnswer},
+		{"decide", "ID TEXT", "record a decision that holds for a node and everything below it", []flagSpec{fBy}, cmdDecide},
 		{"note", "ID TEXT", "append to a node's log", []flagSpec{fBy}, cmdNote},
 		{"link", "CHILD PARENT", "make CHILD block PARENT", []flagSpec{fBy}, cmdLink},
 		{"unlink", "CHILD PARENT", "remove CHILD → PARENT", []flagSpec{fBy}, cmdUnlink},
@@ -153,6 +161,7 @@ func init() {
 		{"sync", "", "catch up with code changes since the last sync (read-only git)", []flagSpec{
 			{"check", "", false, "exit 1 if anything is stale or unmapped (for CI)"},
 			{"dry-run", "", false, "report without writing"},
+			{"run-checks", "", false, "re-run checks of stale nodes: pass clears stale, fail reopens"},
 		}, cmdSync},
 		{"ack", "ID", "mark a stale node as still valid after code changes", []flagSpec{fNote, fOutcome, fBy}, cmdAck},
 		{"fmt", "", "rewrite every node file in the current format", nil, cmdFmt},
@@ -160,7 +169,9 @@ func init() {
 	}
 }
 
-func statusFlags() []flagSpec { return []flagSpec{fOutcome, fNote, fTouches, fForce, fBy} }
+func statusFlags() []flagSpec {
+	return []flagSpec{fOutcome, fNote, fTouches, fForce, fBy, {"skip-check", "", false, "do not run the node's check (logged)"}}
+}
 
 func usage() {
 	fmt.Print("ct — code-tree: dependency graph of work for humans and agents\n\nusage: ct <command> [args]\n\n")
@@ -274,6 +285,7 @@ func cmdAdd(a *Args) {
 		n.Blocks = []string{}
 	}
 	recordCodeTouches(g, n, a.All("touches"))
+	n.Check = oneLine(a.Get("check", ""))
 	appendLog(n, "created", who(a))
 	changed := []*Node{n}
 	for _, p := range parents { // a new child reopens a resolved/ready parent
@@ -295,6 +307,25 @@ func setStatus(a *Args, status, notePrefix string) {
 	if (status == "done" || status == "ready") && f.State == "waiting" && !a.Bool("force") {
 		die("%s is %s; resolve its children first (or --force)", i, f.Label)
 	}
+	checkNote := ""
+	if status == "done" || status == "ready" {
+		if n.Mode == "discuss" && a.Get("outcome", n.Outcome) == "" && !a.Bool("force") {
+			die("%s is a discuss node: close it with the decision, --outcome \"...\"", i)
+		}
+		if n.Check != "" {
+			if a.Bool("skip-check") {
+				checkNote = " (check skipped)"
+			} else {
+				ok, out := runCheck(g, n)
+				if !ok {
+					appendLog(n, "check failed, stays "+n.Status+": "+oneLine(lastLines(out, 3)), who(a))
+					g.mutate(n)
+					die("check failed for %s: %s\n%s", i, n.Check, lastLines(out, 15))
+				}
+				checkNote = " (check passed)"
+			}
+		}
+	}
 	old := n.Status
 	n.Status = status
 	if status == "working" {
@@ -307,7 +338,7 @@ func setStatus(a *Args, status, notePrefix string) {
 	if o := a.Get("outcome", ""); o != "" {
 		n.Outcome = oneLine(o)
 	}
-	msg := old + " → " + status
+	msg := old + " → " + status + checkNote
 	text := a.Get("note", a.Get("outcome", ""))
 	if text != "" {
 		msg += ": " + notePrefix + text
@@ -449,50 +480,66 @@ func cmdLs(a *Args) {
 func cmdShow(a *Args) {
 	need(a, 1, "show")
 	g := load(requireTree())
-	i := g.resolve(a.Pos[0])
-	n, f := g.Nodes[i], g.Info[i]
+	fmt.Print(g.showText(g.resolve(a.Pos[0])))
+}
 
+func (g *Graph) showText(i string) string {
+	var b strings.Builder
+	n, f := g.Nodes[i], g.Info[i]
 	var chain []string // follow first parent up to a head for the "why" chain
 	for cur := f.Parents; len(cur) > 0; cur = g.Info[cur[0]].Parents {
 		chain = append(chain, cur[0])
 	}
-
-	fmt.Println(n.Title)
-	fmt.Printf("  id: %s   state: %s   kind: %s   unblocks: %d\n", i, f.Label, f.Kind, f.Unblocks)
+	fmt.Fprintln(&b, n.Title)
+	fmt.Fprintf(&b, "  id: %s   state: %s   kind: %s   unblocks: %d\n", i, f.Label, f.Kind, f.Unblocks)
 	if n.Mode != "" || n.Agent != "" {
-		fmt.Printf("  mode: %s   agent: %s\n", dash(n.Mode), dash(n.Agent))
+		fmt.Fprintf(&b, "  mode: %s   agent: %s\n", dash(n.Mode), dash(n.Agent))
 	}
 	if n.Outcome != "" {
-		fmt.Println("  outcome:", n.Outcome)
+		fmt.Fprintln(&b, "  outcome:", n.Outcome)
+	}
+	if n.Check != "" {
+		fmt.Fprintln(&b, "  check:", n.Check)
 	}
 	if len(n.Touches) > 0 {
-		fmt.Println("  touches:", strings.Join(n.Touches, ", "))
+		fmt.Fprintln(&b, "  touches:", strings.Join(n.Touches, ", "))
 	}
 	if n.At != "" {
-		fmt.Println("  resolved at:", short(n.At))
+		fmt.Fprintln(&b, "  resolved at:", short(n.At))
 	}
 	if len(n.Stale) > 0 {
-		fmt.Println("  STALE, code changed since:", strings.Join(n.Stale, ", "))
+		fmt.Fprintln(&b, "  STALE, code changed since:", strings.Join(n.Stale, ", "))
+	}
+	if ds := g.decisionsInForce(i); len(ds) > 0 {
+		fmt.Fprintln(&b, "\nDecisions in force (follow these):")
+		for _, d := range ds {
+			from := ""
+			if d[0] != i {
+				from = "  (from " + d[0] + ")"
+			}
+			fmt.Fprintf(&b, "  - %s%s\n", d[1], from)
+		}
 	}
 	if len(chain) > 0 {
-		fmt.Println("\nWhy (chain to head):")
+		fmt.Fprintln(&b, "\nWhy (chain to head):")
 		for d, p := range chain {
-			fmt.Printf("  %s↑ %s\n", strings.Repeat("  ", d), g.line(p))
+			fmt.Fprintf(&b, "  %s↑ %s\n", strings.Repeat("  ", d), g.line(p))
 		}
 		if len(f.Parents) > 1 {
-			fmt.Println("  also blocks:", strings.Join(f.Parents[1:], ", "))
+			fmt.Fprintln(&b, "  also blocks:", strings.Join(f.Parents[1:], ", "))
 		}
 	}
 	if len(f.Children) > 0 {
-		fmt.Println("\nWaits on:")
+		fmt.Fprintln(&b, "\nWaits on:")
 		for _, c := range f.Children {
-			fmt.Println("  -", g.line(c))
+			fmt.Fprintln(&b, "  -", g.line(c))
 			if o := g.Nodes[c].Outcome; o != "" {
-				fmt.Println("      ⇒", o)
+				fmt.Fprintln(&b, "      ⇒", o)
 			}
 		}
 	}
-	fmt.Println("\n" + strings.TrimSpace(n.Body))
+	fmt.Fprintln(&b, "\n"+strings.TrimSpace(n.Body))
+	return b.String()
 }
 
 func dash(s string) string {

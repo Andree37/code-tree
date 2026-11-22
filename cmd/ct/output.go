@@ -176,6 +176,15 @@ func writeGraphMD(dir string) {
 		ids := g.bfs(h)
 		w("## HEAD `%s` — %s · %d nodes · %s\n", h, g.Nodes[h].Title, len(ids), g.Info[h].Label)
 		w("```mermaid\n%s\n```\n", g.mermaid(ids))
+		var ds []string
+		for _, i := range ids {
+			for _, d := range g.Nodes[i].Decisions {
+				ds = append(ds, fmt.Sprintf("- %s (`%s`)", d, i))
+			}
+		}
+		if len(ds) > 0 {
+			w("**Decisions** (hold for the node and everything below it):\n\n%s\n", strings.Join(ds, "\n"))
+		}
 		w("| id | state | title | waits on | blocks | unblocks | mode · agent | touches | outcome |")
 		w("|---|---|---|---|---|---|---|---|---|")
 		for _, i := range ids {

@@ -45,6 +45,13 @@ touching code, and keep the graph honest while you work.
 - Changes no node owns are listed as unmapped in `.tree/GRAPH.md`. Attach them to the
   right node with `ct touch`, or add a node for them.
 
+## Decisions and checks
+- `ct show <id>` lists **Decisions in force**: answers and rulings from this node and
+  every node above it. They are constraints. Follow them; if one blocks you, `ct ask`.
+- A node may have a `check` (a shell command run in the code repo). `ct ready` / `ct done`
+  run it and refuse when it fails. Never use `--skip-check` unless the human told you to.
+- Discuss nodes close with the decision as the outcome: `ct done <id> --outcome "..."`.
+
 ## Rules
 - Never mark something done that you did not verify.
 - Do not resolve another agent's `working` node.

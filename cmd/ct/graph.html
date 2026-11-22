@@ -104,11 +104,12 @@ function parse(text) {
   for (const line of text.split("\n")) {
     const sp = line.indexOf(" "), k = sp < 0 ? line : line.slice(0, sp), v = sp < 0 ? "" : line.slice(sp + 1);
     if (k === "generated") generated = v;
-    else if (k === "@") nodes.push((n = { id: v, body: "" }));
+    else if (k === "@") nodes.push((n = { id: v, body: "", decisions: [] }));
     else if (!n) continue;
     else if (k === "body") n.body += v + "\n";
     else if (LISTS.has(k)) n[k] = v ? v.split("\t") : [];
     else if (k === "unblocks") n[k] = +v;
+    else if (k === "decision") n.decisions.push(v);
     else n[k] = v;
   }
   return { generated, nodes };
@@ -320,6 +321,8 @@ function open(i, keep) {
       ${n.mode || n.agent ? `<br>${esc([n.mode, n.agent].filter(Boolean).join(" · "))}` : ""}</div>
     ${n.outcome ? `<p><b>Outcome:</b> ${esc(n.outcome)}</p>` : ""}
     ${n.stale.length ? `<p style="color:var(--bad)"><b>Stale:</b> code changed since this was resolved: ${n.stale.map((p) => `<code>${esc(p)}</code>`).join(", ")}<br><code>ct ack ${esc(n.id)}</code> if it still holds, or reopen it.</p>` : ""}
+    ${decisionsHTML(i, idx)}
+    ${n.check ? `<p><b>Check:</b> <code>${esc(n.check)}</code></p>` : ""}
     ${n.touches.length ? `<b>Touches</b><ul>${n.touches.map((p) => `<li><code>${esc(p)}</code></li>`).join("")}</ul>` : ""}
     ${n.blocks.length ? `<b>Blocks</b><ul>${n.blocks.map((b) => `<li>${link(b)}</li>`).join("")}</ul>` : ""}
     ${n.waits_on.length ? `<b>Waits on</b><ul>${n.waits_on.map((b) => `<li>${link(b)}${idx[b]?.outcome ? `<br><small>⇒ ${esc(idx[b].outcome)}</small>` : ""}</li>`).join("")}</ul>` : ""}
@@ -332,6 +335,15 @@ function open(i, keep) {
     if (h !== sel.value) { sel.value = h; store.set("ct.head", h); fitted = false; }
     open(t);
   }));
+}
+function decisionsHTML(i, idx) {
+  const out = [], seen = new Set(), q = [i];
+  while (q.length) {
+    const c = q.shift(); if (seen.has(c) || !idx[c]) continue; seen.add(c);
+    for (const d of idx[c].decisions) out.push(`<li>${esc(d)}${c !== i ? ` <small>(from ${esc(idx[c].title)})</small>` : ""}</li>`);
+    q.push(...idx[c].blocks);
+  }
+  return out.length ? `<b>Decisions in force</b><ul>${out.join("")}</ul>` : "";
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
