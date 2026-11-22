@@ -20,14 +20,16 @@ holds up, so the most useful work is easy to spot.
 
 Each node is `.tree/nodes/<id>.md` (frontmatter, `## Context`, `## Log`). A child stores the edge
 (`blocks: [parent]`), so adding work never edits someone else's file and parallel agents rarely
-conflict in git. Agents can read the graph three ways, from cheapest to richest:
+conflict in git. Agents can read the graph in these ways:
 
 | What | For |
 |---|---|
-| `.tree/GRAPH.md` | Regenerated on every change: a **Next** table, plus a mermaid diagram and table per HEAD |
-| `ct next --for agent --json` | The unblocked, unclaimed frontier, highest leverage first |
-| `ct show <id> --json` | One node plus its chain up to the HEAD and the outcomes of its children |
-| `ct graph --json --full` | Everything, including bodies |
+| `.tree/GRAPH.md` | Regenerated on every change: a **Next** table, code-sync status, and a mermaid diagram and table per HEAD |
+| `ct next --for agent` | The unblocked, unclaimed frontier, highest leverage first |
+| `ct show <id>` | One node plus its chain up to the HEAD and the outcomes of its children |
+| `ct ls --all` | Every tree, resolved nodes included |
+
+Everything is plain text, including the node files, `.tree/sync` and the data the web page reads.
 
 `.tree/PROTOCOL.md` (also `ct prompt`) tells agents how to behave: claim, split, ask, log and resolve.
 
@@ -95,7 +97,7 @@ ct sync --check    # same, but exit 1 if anything is stale or unmapped (for CI)
 ct ack map-impl --note "append-only change, outcome holds"
 ```
 
-Each sync makes one `git diff --name-status` from the last synced commit (kept in `.tree/sync.json`)
+Each sync makes one `git diff --name-status` from the last synced commit (kept in `.tree/sync`)
 to HEAD and looks only at the files that changed, so it stays fast on a big codebase and is instant when nothing changed.
 
 - A **resolved node whose files changed** becomes **Stale** (red, dashed) and shows up in Next.
