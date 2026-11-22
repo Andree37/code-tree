@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +53,9 @@ type seer struct {
 	stty     string
 	results  chan string
 	serve    *exec.Cmd
+	pickOn   bool      // the package list is open
+	pickSel  int       // which package is highlighted in it
+	pickRows []pkgInfo // what the list shows
 	lastSeen string
 }
 
@@ -475,21 +477,29 @@ func (s *seer) render() {
 	}
 
 	graphH := s.h - len(out) - 5
+	graphW := s.w
+	var panel []string
+	if s.pickOn { // the package list takes the left side; the graph keeps the rest
+		pw := min(40, max(28, s.w/3))
+		graphW = s.w - pw - 1
+		panel = s.pickerLines(pw, graphH)
+	}
+	var rows []string
 	if s.canvas == nil {
-		add(cDim, " Nothing here yet. The tree grows as you and Claude talk about this package.")
+		rows = append(rows, cDim+cut(" Nothing here yet. The tree grows as you and Claude talk about this package.", graphW)+cReset)
 	} else {
 		// scroll only as far as needed to keep the picked box in view
 		sp := s.pos[s.sel]
 		W, H := len(s.canvas[0]), len(s.canvas)
-		if W > s.w {
+		if W > graphW {
 			if sp[0]-1 < s.ox {
 				s.ox = sp[0] - 1
-			} else if sp[0]+boxW+1 > s.ox+s.w {
-				s.ox = sp[0] + boxW + 1 - s.w
+			} else if sp[0]+boxW+1 > s.ox+graphW {
+				s.ox = sp[0] + boxW + 1 - graphW
 			}
-			s.ox = min(max(0, s.ox), W-s.w)
+			s.ox = min(max(0, s.ox), W-graphW)
 		} else {
-			s.ox = -(s.w - W) / 2
+			s.ox = -(graphW - W) / 2
 		}
 		if H > graphH {
 			if sp[1] < s.oy {
@@ -506,7 +516,7 @@ func (s *seer) render() {
 			y := oy + row
 			var b strings.Builder
 			last := ""
-			for col := 0; col < s.w; col++ {
+			for col := 0; col < graphW; col++ {
 				x := ox + col
 				c := cell{r: ' '}
 				if y >= 0 && y < H && x >= 0 && x < W {
@@ -518,7 +528,17 @@ func (s *seer) render() {
 				}
 				b.WriteRune(c.r)
 			}
-			out = append(out, b.String()+cReset)
+			rows = append(rows, b.String()+cReset)
+		}
+	}
+	for len(rows) < graphH {
+		rows = append(rows, "")
+	}
+	for i := 0; i < graphH; i++ {
+		if panel != nil {
+			out = append(out, panel[i]+cDim+"│"+cReset+rows[i])
+		} else {
+			out = append(out, rows[i])
 		}
 	}
 	for len(out) < s.h-4 {
@@ -536,7 +556,7 @@ func (s *seer) render() {
 	if s.inputOn {
 		add(cOrange, " "+s.prompt+" › "+string(s.input)+"▏")
 	} else {
-		add(cDim, " arrows: pick a box · enter: read it · t: ask Claude about it · g: tell Claude to go back to it · ?: help · q: close   "+s.msg)
+		add(cDim, " arrows: pick a box · enter: read it · t: ask Claude about it · g: tell Claude to go back to it · p: folders · ?: help · q: close   "+s.msg)
 	}
 	s.flush(out)
 }
@@ -583,6 +603,26 @@ func (s *seer) key(k string) bool {
 		s.overlay = nil
 		return true
 	}
+	if s.pickOn {
+		switch k {
+		case "\x1b[A", "k":
+			s.pickSel = max(0, s.pickSel-1)
+		case "\x1b[B", "j":
+			s.pickSel = min(len(s.pickRows)-1, s.pickSel+1)
+		case "\r", "\n":
+			if s.pickSel < len(s.pickRows) {
+				p := s.pickRows[s.pickSel]
+				// picking Claude's own package means: follow Claude again
+				s.pkg, s.pinned, s.head, s.sel = p.rel, !p.current, "", ""
+				s.reload()
+				s.msg = "showing " + p.name
+			}
+			s.pickOn = false
+		case "\x1b", "p":
+			s.pickOn = false
+		}
+		return true
+	}
 	switch k {
 	case "\x1b":
 		return false
@@ -626,16 +666,7 @@ func (s *seer) key(k string) bool {
 		s.pinned, s.sel = true, s.head
 		s.layout()
 	case "p":
-		if len(s.pkgs) > 0 {
-			i := sort.SearchStrings(nil, "")
-			for j, p := range s.pkgs {
-				if p == s.pkg {
-					i = j
-				}
-			}
-			s.pkg, s.pinned, s.head, s.sel = s.pkgs[(i+1)%len(s.pkgs)], true, "", ""
-			s.reload()
-		}
+		s.openPicker()
 	case "f":
 		s.pinned = false
 		s.reload()
@@ -659,7 +690,7 @@ func (s *seer) key(k string) bool {
 			"  g           ask Claude to go back to that box and continue it",
 			"",
 			"  o           show the next subject in this folder (if there are several)",
-			"  p           show another code folder you worked in",
+			"  p           list the code folders you worked in, with their status, and pick one",
 			"  f           follow Claude again after o or p",
 			"  b           open the same map in your web browser",
 			"  q / esc     close",
@@ -789,4 +820,119 @@ func plainMeaning(f *Info) string {
 		return "Some points under it are still open."
 	}
 	return "Still being discussed."
+}
+
+// ---------------------------------------------------------------- package list
+
+type pkgInfo struct {
+	rel, name                      string
+	subjects, waiting, settled, of int
+	updated                        time.Time
+	current                        bool // Claude is working in it now
+}
+
+// packageRows describes every package of this repo that has a graph.
+func (s *seer) packageRows() []pkgInfo {
+	var rows []pkgInfo
+	for _, rel := range s.pkgs {
+		t := pkgTree(s.root, rel)
+		g := load(t)
+		p := pkgInfo{rel: rel, name: pkgName(s.root, rel), current: rel == s.st["package"]}
+		for _, i := range g.IDs {
+			switch {
+			case g.Info[i].Kind == "head":
+				p.subjects++
+			default:
+				p.of++
+				switch g.Info[i].State {
+				case "needs-you":
+					p.waiting++
+				case "done", "dropped", "ready":
+					p.settled++
+				}
+			}
+		}
+		if info, err := os.Stat(filepath.Join(t, "GRAPH.md")); err == nil {
+			p.updated = info.ModTime()
+		}
+		rows = append(rows, p)
+	}
+	return rows
+}
+
+func (s *seer) openPicker() {
+	s.pkgs = repoPackages(s.root)
+	s.pickRows = s.packageRows()
+	s.pickSel = 0
+	for i, p := range s.pickRows {
+		if p.rel == s.pkg {
+			s.pickSel = i
+		}
+	}
+	s.pickOn = true
+}
+
+func ago(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%d min ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d h ago", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+}
+
+// pickerLines draws the package list, pw wide and h tall.
+func (s *seer) pickerLines(pw, h int) []string {
+	pad := func(color, text string) string {
+		text = cut(text, pw)
+		return color + text + strings.Repeat(" ", max(0, pw-visible(text))) + cReset
+	}
+	var lines []string
+	var selTop int
+	lines = append(lines, pad(cBold, " Code folders"), pad(cDim, " ↑↓ pick · enter open · esc close"), pad("", ""))
+	for i, p := range s.pickRows {
+		if i == s.pickSel {
+			selTop = len(lines)
+		}
+		title := " " + p.name
+		if p.rel == s.pkg {
+			title = "▸" + p.name
+		}
+		color := cBold
+		if i == s.pickSel {
+			color = cRev + cBold
+		}
+		lines = append(lines, pad(color, title))
+		status := fmt.Sprintf("   %d of %d settled", p.settled, p.of)
+		if p.waiting > 0 {
+			lines = append(lines, pad(cOrange, fmt.Sprintf("   %d waiting for you", p.waiting)))
+		}
+		lines = append(lines, pad("", status))
+		extra := fmt.Sprintf("   %d subject(s) · %s", p.subjects, ago(p.updated))
+		lines = append(lines, pad(cDim, extra))
+		if p.current {
+			lines = append(lines, pad(cBlue, "   ● Claude is working here"))
+		}
+		lines = append(lines, pad("", ""))
+	}
+	if len(s.pickRows) == 0 {
+		lines = append(lines, pad(cDim, " No folders yet."))
+	}
+	// keep the highlighted package in view
+	start := 0
+	if selTop+5 > h {
+		start = selTop + 5 - h
+	}
+	lines = lines[min(start, len(lines)):]
+	for len(lines) < h {
+		lines = append(lines, pad("", ""))
+	}
+	return lines[:h]
 }
