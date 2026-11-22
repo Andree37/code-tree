@@ -77,6 +77,35 @@ at a time, like the tree above) and **Tracker** (a board with one column per sta
 The author on log lines comes from `--by`, then `$CT_AGENT`, then `human`. Give each agent its own
 `CT_AGENT` so the log shows who did what.
 
+## Keeping up with the code
+
+The tree never touches your code repo: no hooks, no commit trailers, no files in it. It only reads git
+(`rev-parse`, `diff`, `merge-base`), and only when you run `ct sync`.
+
+```sh
+ct init --code ../my-zig-project     # keep the tree in its own folder/repo, pointing at the code
+CT_TREE=~/plans/my-zig-project ct next   # or point at a tree from anywhere
+
+ct add "Map impl" -b maps -t src/std/map.zig     # nodes say which code they own: paths, dir/, globs
+ct done map-impl --touches auto                  # or: everything changed since the node was claimed
+ct touch map-impl src/std/map/                   # add ownership later (--rm to remove)
+
+ct sync            # diff code since the last sync; rewrites only the nodes whose files changed
+ct sync --check    # same, but exit 1 if anything is stale or unmapped (for CI)
+ct ack map-impl --note "append-only change, outcome holds"
+```
+
+Each sync makes one `git diff --name-status` from the last synced commit (kept in `.tree/sync.json`)
+to HEAD and looks only at the files that changed, so it stays fast on a big codebase and is instant when nothing changed.
+
+- A **resolved node whose files changed** becomes **Stale** (red, dashed) and shows up in Next.
+  Recheck it: `ct ack` if the outcome still holds, `ct open` if it doesn't.
+- **Renamed files** update the node's `touches` automatically.
+- **Changes no node owns** are listed as **unmapped** in `.tree/GRAPH.md` until a node claims them.
+  Noise like lockfiles is filtered by `ignore =` in `.tree/config`.
+
+Ownership works on paths, so any language works the same way.
+
 ## Rules the CLI enforces
 
 - A node with unresolved children can't be marked `ready` or `done` without `--force`.
