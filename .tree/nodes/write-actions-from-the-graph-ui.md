@@ -1,11 +1,11 @@
 ---
 id: write-actions-from-the-graph-ui
-title: "Write actions from the graph UI"
+title: Write actions from the graph UI
 mode: build
 agent: 
 status: open
-blocks: ["code-tree-v0-2"]
-outcome: ""
+blocks: code-tree-v0-2
+outcome: 
 created: 2026-11-22 14:04:19
 updated: 2026-11-22 14:04:19
 ---

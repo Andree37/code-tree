@@ -1,11 +1,11 @@
 ---
 id: code-tree-v0-2
-title: "code-tree v0.2"
+title: code-tree v0.2
 mode: discuss
 agent: 
 status: open
-blocks: []
-outcome: ""
+blocks: 
+outcome: 
 created: 2026-11-22 14:04:19
 updated: 2026-11-22 14:04:19
 ---

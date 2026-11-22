@@ -1,11 +1,11 @@
 ---
 id: link-nodes-to-branches-commits-prs
-title: "Link nodes to branches, commits, PRs"
+title: Link nodes to branches, commits, PRs
 mode: discuss
 agent: 
 status: needs-you
-blocks: ["code-tree-v0-2"]
-outcome: ""
+blocks: code-tree-v0-2
+outcome: 
 created: 2026-11-22 14:04:19
 updated: 2026-11-22 14:04:20
 ---
