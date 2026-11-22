@@ -403,6 +403,8 @@ func (g *Graph) compute() {
 		}
 		if n.Status == "proposed" {
 			f.State, f.Label = "proposed", "Proposed"
+		} else if n.Status == "needs-you" { // a question for the human shows even with open points under it
+			f.State, f.Label = "needs-you", "Needs you"
 		} else if !resolved(n.Status) && done < len(f.Children) {
 			f.State, f.Label = "waiting", fmt.Sprintf("Waiting %d/%d", done, len(f.Children))
 		} else if resolved(n.Status) && len(n.Stale) > 0 {

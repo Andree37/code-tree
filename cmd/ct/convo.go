@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -208,13 +210,24 @@ func readTurns(path string) []turn {
 		line, err := rd.ReadBytes('\n')
 		if len(line) > 0 {
 			var l struct {
-				Type    string `json:"type"`
-				IsMeta  bool   `json:"isMeta"`
-				Message struct {
+				Type       string `json:"type"`
+				IsMeta     bool   `json:"isMeta"`
+				Compact    bool   `json:"isCompactSummary"`          // a compaction summary, not the human
+				Transcript bool   `json:"isVisibleInTranscriptOnly"` // shown in the transcript, never typed
+				Message    struct {
 					Content json.RawMessage `json:"content"`
 				} `json:"message"`
+				Attachment struct {
+					HookEvent string `json:"hookEvent"`
+					Content   string `json:"content"`
+				} `json:"attachment"`
 			}
-			if json.Unmarshal(line, &l) == nil && !l.IsMeta {
+			if json.Unmarshal(line, &l) == nil && !l.IsMeta && !l.Compact && !l.Transcript {
+				// an intercom message delivered with a prompt is part of what the human said
+				if l.Attachment.HookEvent == "UserPromptSubmit" && strings.HasPrefix(l.Attachment.Content, "[intercom]") && len(turns) > 0 {
+					turns[len(turns)-1].prompt += "\n" + l.Attachment.Content
+					continue
+				}
 				switch l.Type {
 				case "user":
 					if p := userText(l.Message.Content); p != "" {
@@ -280,7 +293,14 @@ func cleanPrompt(s string) string {
 		}
 	}
 	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "<command-") || strings.HasPrefix(s, "[Request interrupted") || strings.HasPrefix(s, "Caveat:") {
+	for _, notHuman := range []string{"<command-", "[Request interrupted", "Caveat:", "<task-notification>",
+		"[SYSTEM NOTIFICATION", "This session is being continued from a previous conversation"} {
+		if strings.HasPrefix(s, notHuman) {
+			return ""
+		}
+	}
+	// a slash command ("/code-review max") runs a tool; it is not a topic
+	if strings.HasPrefix(s, "/") && !strings.Contains(s, "\n") && len(strings.Fields(s)) <= 4 {
 		return ""
 	}
 	return s
@@ -363,7 +383,7 @@ parent: <for a new thread: id of the thread or HEAD it branches from, or new-top
 topic: <only when parent is new-topic: 3 to 7 words naming the new topic>
 title: <3 to 7 words naming the thread>
 status: <open | needs-you | ready>
-summary: <one short sentence: where this thread stands now; for needs-you, the exact question the agent asked>
+summary: <one line: where this thread stands now; for needs-you, the exact question the agent asked, on one line>
 close: <ids of other threads this turn settled, comma separated, or none>
 
 Rules:
@@ -383,7 +403,7 @@ Rules:
   open while it is still being worked on or discussed.
 - Re-judge every thread marked needs-you in the tree: if the developer's newest message answered
   it or moved past it, or it was only an optional offer, list it in close.
-- If the developer's message contains "[code-tree · <id>", the turn belongs to thread <id>.
+- Every value stays on its one line; never start a new line inside a value.
 - A HEAD is never the thread itself. Titles name the subject, not the latest event.
 `)
 	return b.String()
@@ -391,13 +411,19 @@ Rules:
 
 func parsePlacement(out string) placement {
 	var p placement
+	seen := map[string]bool{}
 	for _, line := range strings.Split(out, "\n") {
 		k, v, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
 		}
-		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), "`<>\""))
-		switch strings.ToLower(strings.TrimSpace(k)) {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if seen[key] {
+			continue // the first answer counts; a copied line like "Status: ..." must not overwrite it
+		}
+		seen[key] = true
+		v = unwrapValue(v)
+		switch key {
 		case "thread":
 			p.thread = v
 		case "parent":
@@ -413,7 +439,7 @@ func parsePlacement(out string) placement {
 		case "close":
 			if !strings.EqualFold(v, "none") {
 				for _, c := range strings.Split(v, ",") {
-					if c = strings.TrimSpace(c); c != "" {
+					if c = strings.Trim(strings.TrimSpace(c), "`*\"' "); c != "" {
 						p.close = append(p.close, c)
 					}
 				}
@@ -422,10 +448,24 @@ func parsePlacement(out string) placement {
 	}
 	switch p.status {
 	case "open", "needs-you", "ready":
+	case "done", "settled", "closed", "resolved", "finished":
+		p.status = "ready" // the tree shows settled nodes as done; read that back as settled
 	default:
 		p.status = "open"
 	}
 	return p
+}
+
+// unwrapValue trims a reply value and removes one pair of wrapping quotes,
+// backticks or <> placeholders, leaving quotes inside the text alone.
+func unwrapValue(v string) string {
+	v = strings.TrimSpace(v)
+	for _, pair := range []string{"``", `""`, "<>", "''"} {
+		if len(v) >= 2 && v[0] == pair[0] && v[len(v)-1] == pair[1] {
+			return strings.TrimSpace(v[1 : len(v)-1])
+		}
+	}
+	return v
 }
 
 // classify asks the small model where a turn goes. Its own session must not
@@ -439,7 +479,7 @@ func askModel(model, prompt, cwd string) (string, error) {
 	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "CT_SKIP=1", "IC_SKIP=1", "IC_ID=", "CLAUDECODE=")
+	cmd.Env = helperEnv()
 	out, err := cmd.Output()
 	return string(out), err
 }
@@ -459,13 +499,18 @@ func newNode(g *Graph, title, agent string, blocks []string) *Node {
 // apply puts a turn into a package tree and returns the thread it landed on.
 func apply(tree, agent string, p placement) string {
 	g := load(tree)
-	var changed []*Node
+	changed := map[string]*Node{}
+	mark := func(n *Node) { changed[n.ID] = n }
 	n := g.Nodes[p.thread]
+	named := "" // a subject the model pointed at as the thread: file the turn under it
 	if n != nil && g.Info[p.thread].Kind == "head" {
-		n = nil
+		named, n = p.thread, nil
 	}
 	if n == nil {
 		parent := p.parent
+		if g.Nodes[parent] == nil && named != "" {
+			parent = named
+		}
 		if g.Nodes[parent] == nil || parent == "new-topic" {
 			heads := g.heads()
 			if parent == "new-topic" || len(heads) == 0 {
@@ -477,7 +522,7 @@ func apply(tree, agent string, p placement) string {
 					topic = "Topic"
 				}
 				h := newNode(g, topic, agent, []string{})
-				changed = append(changed, h)
+				mark(h)
 				parent = h.ID
 			} else {
 				parent = heads[len(heads)-1]
@@ -488,25 +533,93 @@ func apply(tree, agent string, p placement) string {
 			title = clip(p.summary, 40, false)
 		}
 		n = newNode(g, title, agent, []string{parent})
-	}
-	n.Status = p.status
-	if n.Status == "ready" { // a settled point counts as done, so "k of n settled" adds up
-		n.Status = "done"
-	}
-	if p.summary != "" {
-		n.Outcome = p.summary
-	}
-	appendLog(n, p.status+": "+p.summary, agent)
-	changed = append(changed, n)
-	for _, c := range p.close {
-		if cn := g.Nodes[c]; cn != nil && c != n.ID && g.Info[c] != nil && g.Info[c].Kind != "head" && cn.Status != "done" {
-			cn.Status = "done"
-			appendLog(cn, "settled", agent)
-			changed = append(changed, cn)
+		// a new point under a settled one means it is open again
+		if pn := g.Nodes[parent]; pn != nil && g.Info[parent] != nil && g.Info[parent].Kind != "head" &&
+			(pn.Status == "done" || pn.Status == "ready") {
+			pn.Status = "open"
+			appendLog(pn, "reopened: new point `"+n.ID+"` under it", agent)
+			mark(pn)
 		}
 	}
-	g.mutate(changed...)
+	wasWaiting := n.Status == "needs-you"
+	n.Status = p.status
+	switch {
+	case p.summary != "":
+		n.Outcome = p.summary
+	case wasWaiting && p.status != "needs-you":
+		n.Outcome = "Answered." // never leave the old question as the outcome
+	}
+	appendLog(n, plainStatusWord(p.status)+": "+p.summary, agent)
+	mark(n)
+	for _, c := range p.close {
+		cn := g.Nodes[c]
+		if cn == nil || c == n.ID || g.Info[c] == nil || g.Info[c].Kind == "head" || resolved(cn.Status) || cn.Status == "ready" {
+			continue
+		}
+		if cn.Status == "needs-you" {
+			cn.Outcome = "Answered: " + p.summary
+		}
+		cn.Status = "ready"
+		appendLog(cn, "settled", agent)
+		mark(cn)
+	}
+	settle(g, mark)
+	var list []*Node
+	for _, c := range changed {
+		list = append(list, c)
+	}
+	g.mutate(list...)
 	return n.ID
+}
+
+func plainStatusWord(s string) string {
+	switch s {
+	case "ready", "done":
+		return "settled"
+	case "needs-you":
+		return "waiting for you"
+	}
+	return s
+}
+
+// settle keeps settled-ness honest across the tree: a settled point counts as
+// done only when nothing under it is still open (until then it shows "k of n
+// settled"), and a subject is settled exactly when all its points are.
+func settle(g *Graph, mark func(*Node)) {
+	for pass := 0; pass <= len(g.IDs); pass++ {
+		g.compute()
+		moved := false
+		for _, i := range g.IDs {
+			n, f := g.Nodes[i], g.Info[i]
+			open := false
+			for _, c := range f.Children {
+				if !resolved(g.Nodes[c].Status) {
+					open = true
+				}
+			}
+			want := n.Status
+			switch {
+			case f.Kind == "head" && len(f.Children) > 0 && (n.Status == "open" || n.Status == "done"):
+				want = "open"
+				if !open {
+					want = "done"
+				}
+			case f.Kind != "head" && (n.Status == "ready" || n.Status == "done"):
+				want = "ready"
+				if !open {
+					want = "done"
+				}
+			}
+			if want != n.Status {
+				n.Status = want
+				mark(n)
+				moved = true
+			}
+		}
+		if !moved {
+			return
+		}
+	}
 }
 
 // ---------------------------------------------------------------- worker
@@ -537,39 +650,74 @@ func cmdTurn(a *Args) {
 		cwd = st["cwd"]
 	}
 	root := repoRoot(cwd)
-	st["transcript"], st["cwd"], st["repo"] = path, cwd, root
-	if st["agent"] == "" {
-		st["agent"] = icNameFor(id)
+	agent := st["agent"]
+	if agent == "" {
+		agent = icNameFor(id)
 	}
-	if _, ok := st["package"]; !ok {
-		st["package"] = "."
+	pkg, ok := st["package"]
+	if !ok {
+		pkg = "."
 	}
+	updateConvo(id, func(st convoState) {
+		st["transcript"], st["cwd"], st["repo"], st["agent"] = path, cwd, root, agent
+	})
 	for {
 		turns := readTurns(path)
+		st := readConvo(id)
 		done, _ := strconv.Atoi(st["turns"])
-		if done < len(turns)-maxBackfill {
-			done = len(turns) - maxBackfill
+		// only turns that have ended: the stop hook records how many there are
+		complete, err := strconv.Atoi(st["complete"])
+		if err != nil || complete > len(turns) {
+			complete = len(turns)
 		}
-		if done >= len(turns) {
+		if done < complete-maxBackfill {
+			done = complete - maxBackfill
+		}
+		if done >= complete {
 			break
 		}
 		t := turns[done]
-		if strings.TrimSpace(t.reply) == "" && done == len(turns)-1 {
-			break // the last turn is still being answered
+		var landed, tree string
+		if strings.TrimSpace(t.reply) != "" { // a turn with no answer (a tool command) is skipped
+			rel := packageOf(root, t.files, pkg)
+			tree = pkgTree(root, rel)
+			g := load(tree)
+			out, err := classify(classifyPrompt(g, pkgName(root, rel), t), cwd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s classify turn %d: %v\n", now(), done, err)
+				break
+			}
+			p := parsePlacement(out)
+			if id := pointedAt(t.prompt, g); id != "" {
+				p.thread = id // the human pressed t on this box: no guessing
+			}
+			landed, pkg = apply(tree, agent, p), rel
 		}
-		rel := packageOf(root, t.files, st["package"])
-		tree := pkgTree(root, rel)
-		out, err := classify(classifyPrompt(load(tree), pkgName(root, rel), t), cwd)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s classify turn %d: %v\n", now(), done, err)
-			break
-		}
-		st["current"] = apply(tree, st["agent"], parsePlacement(out))
-		st["package"], st["tree"] = rel, tree
-		st["turns"] = strconv.Itoa(done + 1)
-		st["updated"] = now()
-		st.save(id)
+		updateConvo(id, func(st convoState) {
+			if landed != "" {
+				st["current"], st["package"], st["tree"] = landed, pkg, tree
+			}
+			st["turns"] = strconv.Itoa(done + 1)
+			st["updated"] = now()
+		})
 	}
+}
+
+var pointer = regexp.MustCompile(`\[code-tree · [^·\]]+ · ([a-z0-9-]+)`)
+
+// pointedAt is the box a message sent from the graph pane (t or g) was about.
+func pointedAt(prompt string, g *Graph) string {
+	if m := pointer.FindStringSubmatch(prompt); m != nil && g.Nodes[m[1]] != nil && g.Info[m[1]].Kind != "head" {
+		return m[1]
+	}
+	return ""
+}
+
+// updateConvo changes a session's state from a fresh read, so the hooks and
+// the worker never undo each other's writes.
+func updateConvo(id string, change func(convoState)) {
+	st := readConvo(id)
+	change(st)
 	st.save(id)
 }
 
@@ -628,19 +776,19 @@ func cmdHook(a *Args) {
 	if json.Unmarshal(data, &in) != nil || in.SessionID == "" {
 		return
 	}
-	st := readConvo(in.SessionID)
 	switch a.Pos[0] {
 	case "prompt":
-		st["busy"] = now()
-		st["cwd"] = in.Cwd
-		st.save(in.SessionID)
+		updateConvo(in.SessionID, func(st convoState) { st["busy"], st["cwd"] = now(), in.Cwd })
 	case "end":
-		delete(st, "busy")
-		st.save(in.SessionID)
+		updateConvo(in.SessionID, func(st convoState) { delete(st, "busy") })
 		closeTab(in.SessionID, in.Reason)
 	case "stop":
-		delete(st, "busy")
-		st.save(in.SessionID)
+		// the turn just ended: every turn in the transcript so far is complete
+		complete := strconv.Itoa(len(readTurns(in.TranscriptPath)))
+		updateConvo(in.SessionID, func(st convoState) {
+			delete(st, "busy")
+			st["complete"] = complete
+		})
 		exe, err := os.Executable()
 		if err != nil {
 			return
@@ -797,6 +945,12 @@ func cmdRecheck(a *Args) {
 	settled, kept := 0, 0
 	for _, tree := range trees {
 		g := load(tree)
+		var fixed []*Node // trees saved before settling was consistent
+		settle(g, func(n *Node) { fixed = append(fixed, n) })
+		if len(fixed) > 0 {
+			g.mutate(fixed...)
+			g = load(tree)
+		}
 		var waiting []string
 		var b strings.Builder
 		b.WriteString(`Each item below is a thread from a developer's conversation with a coding agent that is
@@ -865,8 +1019,8 @@ settled: the work reached an outcome and the agent only offered optional next st
 				continue // changed meanwhile
 			}
 			if strings.HasPrefix(verdict[i], "settled") {
-				n.Status = "done"
-				appendLog(n, "settled on recheck: it was not really waiting on you", "ct recheck")
+				appendLog(n, "settled on recheck: it was not really waiting on you (it said: "+n.Outcome+")", "ct recheck")
+				n.Status, n.Outcome = "ready", "Settled on recheck."
 				changed = append(changed, n)
 				settled++
 				fmt.Printf("settled  %s\n", n.Title)
@@ -876,6 +1030,11 @@ settled: the work reached an outcome and the agent only offered optional next st
 			}
 		}
 		if len(changed) > 0 {
+			settle(g, func(n *Node) {
+				if !slices.Contains(changed, n) {
+					changed = append(changed, n)
+				}
+			})
 			g.mutate(changed...)
 		}
 	}
@@ -910,4 +1069,19 @@ func recentPrompts(pkgDir string, n int) string {
 		prompts = prompts[len(prompts)-n:]
 	}
 	return strings.Join(prompts, "\n") + "\n"
+}
+
+// helperEnv is the environment for a helper `claude -p` (placing turns, node
+// chats): it must not build a conversation tree of its own, join intercom, or
+// look like the agent of the herdr pane it was started from.
+func helperEnv(extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, "HERDR_") || k == "IC_ID" || k == "CLAUDECODE" {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(append(env, "CT_SKIP=1", "IC_SKIP=1"), extra...)
 }

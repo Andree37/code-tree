@@ -59,7 +59,7 @@ func cmdChat(a *Args) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", cfg.Chat)
 	cmd.Dir = cfg.Code
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = append(os.Environ(), "CT_TREE="+tree, "CT_AGENT="+agent)
+	cmd.Env = helperEnv("CT_TREE="+tree, "CT_AGENT="+agent)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

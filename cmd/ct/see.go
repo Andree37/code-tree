@@ -30,6 +30,7 @@ type cell struct {
 
 type seer struct {
 	session  string // Claude session id being followed
+	auto     bool   // no --session given: follow whichever Claude is in this tab now
 	st       convoState
 	root     string
 	pkgs     []string
@@ -70,7 +71,7 @@ func cmdSee(a *Args) {
 	if err != nil {
 		die("ct see needs a terminal")
 	}
-	s := &seer{session: id, stty: strings.TrimSpace(string(saved)), results: make(chan string, 8)}
+	s := &seer{session: id, auto: a.Get("session", "") == "", stty: strings.TrimSpace(string(saved)), results: make(chan string, 8)}
 	stty("-icanon", "-echo", "min", "1")
 	fmt.Print("\x1b[?1049h\x1b[?25l")
 	defer func() {
@@ -176,6 +177,9 @@ func (s *seer) size() {
 
 func (s *seer) signature() string {
 	var b strings.Builder
+	if s.auto {
+		b.WriteString(pickSession("") + ";") // a new session in this tab
+	}
 	if info, err := os.Stat(filepath.Join(sessionDir(s.session), "convo")); err == nil {
 		fmt.Fprintf(&b, "%d;", info.ModTime().UnixNano())
 	}
@@ -188,6 +192,11 @@ func (s *seer) signature() string {
 }
 
 func (s *seer) reload() {
+	if s.auto { // after /clear or /resume the tab runs a new session: follow it
+		if id := pickSession(""); id != "" && id != s.session {
+			s.session, s.head, s.sel, s.lastSeen = id, "", "", ""
+		}
+	}
 	s.sig = s.signature()
 	s.st = readConvo(s.session)
 	s.root = s.st["repo"]
@@ -477,7 +486,7 @@ func (s *seer) render() {
 		return
 	}
 
-	graphH := s.h - len(out) - 5
+	graphH := s.h - len(out) - 6
 	graphW := s.w
 	var panel []string
 	if s.pickOn { // the package list takes the left side; the graph keeps the rest
@@ -542,15 +551,25 @@ func (s *seer) render() {
 			out = append(out, rows[i])
 		}
 	}
-	for len(out) < s.h-4 {
+	for len(out) < s.h-5 {
 		out = append(out, "")
 	}
 	add(cDim, strings.Repeat("─", s.w))
 	if n := s.g.Nodes[s.sel]; n != nil {
 		f := s.g.Info[s.sel]
 		add(cBold, " "+n.Title+cReset+cDim+"  "+plainMeaning(f))
-		add("", " "+cut(n.Outcome, s.w-2))
+		lines := wrapTitle(n.Outcome, s.w-2, 2) // two lines, so a question's options stay visible
+		for len(lines) < 2 {
+			lines = append(lines, "")
+		}
+		color := ""
+		if f.State == "needs-you" {
+			color = cOrange
+		}
+		add(color, " "+lines[0])
+		add(color, " "+lines[1])
 	} else {
+		add("", "")
 		add("", "")
 		add("", "")
 	}
@@ -660,9 +679,15 @@ func (s *seer) key(k string) bool {
 			s.send(fmt.Sprintf("[code-tree · %s · %s · %s]\n%s", pkgName(s.root, s.pkg), id, title, t))
 		})
 	case "g", "s":
-		n := s.g.Nodes[s.sel]
-		s.send(fmt.Sprintf("[code-tree · %s · %s] Let's switch to the thread “%s” in %s. Where it stands: %s Pick it up from there.",
-			pkgName(s.root, s.pkg), s.sel, n.Title, pkgName(s.root, s.pkg), n.Outcome))
+		n, id := s.g.Nodes[s.sel], s.sel
+		if n.Status == "needs-you" { // Claude is waiting on an answer: ask for it, never hand back its own question
+			s.ask("your answer to: "+n.Outcome, func(t string) {
+				s.send(fmt.Sprintf("[code-tree · %s · %s · %s]\nMy answer to your question (%s): %s", pkgName(s.root, s.pkg), id, n.Title, n.Outcome, t))
+			})
+			break
+		}
+		s.send(fmt.Sprintf("[code-tree · %s · %s] Let's go back to the thread “%s” in %s. Where it stands: %s Pick it up from there.",
+			pkgName(s.root, s.pkg), id, n.Title, pkgName(s.root, s.pkg), n.Outcome))
 	case "o":
 		heads := s.g.heads()
 		for i, h := range heads {
@@ -748,7 +773,11 @@ func (s *seer) details() {
 		"",
 	}
 	if n.Outcome != "" {
-		lines = append(lines, "Where it stands: "+n.Outcome, "")
+		lines = append(lines, "Where it stands:")
+		for _, l := range wrapTitle(n.Outcome, s.w-6, 12) {
+			lines = append(lines, "  "+l)
+		}
+		lines = append(lines, "")
 	}
 	lines = append(lines, "History:")
 	for _, l := range strings.Split(n.Body, "\n") {
@@ -804,6 +833,9 @@ const cWhite = "\x1b[97m"
 
 // plainLabel is a box's state in everyday words.
 func plainLabel(f *Info) string {
+	if f.Kind == "head" && f.State == "done" {
+		return "All settled"
+	}
 	switch f.State {
 	case "needs-you":
 		return "Waiting for you"
@@ -958,10 +990,10 @@ func (s *seer) toggleWaiting() {
 	}
 	switch n.Status {
 	case "needs-you":
-		n.Status = "done"
-		appendLog(n, "you marked it settled: it was not waiting on you", "human")
+		appendLog(n, "you marked it settled: it was not waiting on you (it said: "+n.Outcome+")", "human")
+		n.Status, n.Outcome = "ready", "You marked this settled."
 		s.msg = "marked settled"
-	case "done":
+	case "done", "ready":
 		n.Status = "needs-you"
 		appendLog(n, "you marked it as waiting for you again", "human")
 		s.msg = "marked waiting for you"
@@ -969,6 +1001,12 @@ func (s *seer) toggleWaiting() {
 		s.msg = "x only flips between waiting for you and settled"
 		return
 	}
-	g.mutate(n)
+	changed := []*Node{n}
+	settle(g, func(m *Node) {
+		if m != n {
+			changed = append(changed, m)
+		}
+	})
+	g.mutate(changed...)
 	s.reload()
 }
