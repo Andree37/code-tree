@@ -113,6 +113,27 @@ add sub-task, note, drop) and a **chat** with an agent about that node.
   has. Actions run fixed `ct` commands, never a shell.
 - Open a node directly with `http://127.0.0.1:7337/#<id>`.
 
+## Talking: intercom
+
+ct speaks through [intercom](https://github.com/Andree37/intercom) (`ic`), a separate tool that lets
+agent sessions and you message each other, delivered only at safe moments (between tool calls, at the
+end of a turn, or by waking an idle agent in herdr).
+
+- When you answer, accept, reject, decide, note or send back a node, the agents involved (its owner,
+  whoever asked its question, whoever proposed it) hear about it. A decision also reaches the agents
+  working below it.
+- `ct talk <id> "..."` messages the agent working on a node, or the agent in your herdr tab.
+  `ct work <id>` asks it to start on that node now.
+- `ct claim` warns when another agent is working on files this node touches, and tells that agent too.
+- Inside a Claude session, ct knows who is acting from intercom, so log lines and claims carry the
+  session's name.
+
+Without `ic` installed, ct works as before and only talking is off.
+
+```sh
+go install github.com/Andree37/intercom/cmd/ic@latest && ic install claude
+```
+
 ## Keeping up with the code
 
 The tree never touches your code repo: no hooks, no commit trailers, no files in it. It only reads git

@@ -52,6 +52,14 @@ touching code, and keep the graph honest while you work.
   run it and refuse when it fails. Never use `--skip-check` unless the human told you to.
 - Discuss nodes close with the decision as the outcome: `ct done <id> --outcome "..."`.
 
+## Talking (intercom)
+- ct talks through intercom (`ic`). When the human answers, accepts, decides or sends a
+  node back, the agents on that node get a message automatically, at a safe moment.
+- `ct talk <id> "..."` messages the agent working on a node; `ic send <name> "..."` and
+  `ic ask <name> "..."` reach any session (`ic who` lists them). Answer with `ic reply`.
+- If `ct claim` warns that another agent touches the same files, agree with it over
+  `ct talk` before editing them.
+
 ## Rules
 - Never mark something done that you did not verify.
 - Do not resolve another agent's `working` node.

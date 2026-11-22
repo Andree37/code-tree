@@ -148,6 +148,8 @@ func init() {
 		{"answer", "ID TEXT", "answer a needs-you node; the answer becomes a decision for it and everything below", []flagSpec{fBy}, cmdAnswer},
 		{"decide", "ID TEXT", "record a decision that holds for a node and everything below it", []flagSpec{fBy}, cmdDecide},
 		{"chat", "ID [MESSAGE]", "talk to the chat agent about a node (no message: print the chat)", []flagSpec{fBy}, cmdChat},
+		{"talk", "ID TEXT", "message the agent on a node (its owner, else the agent in this herdr tab) via intercom", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdTalk},
+		{"work", "ID", "ask the agent in this tab (or --to) to work on a node now", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdWork},
 		{"note", "ID TEXT", "append to a node's log", []flagSpec{fBy}, cmdNote},
 		{"link", "CHILD PARENT", "make CHILD block PARENT", []flagSpec{fBy}, cmdLink},
 		{"unlink", "CHILD PARENT", "remove CHILD → PARENT", []flagSpec{fBy}, cmdUnlink},
@@ -213,6 +215,12 @@ func who(a *Args) string {
 	}
 	if env := os.Getenv("CT_AGENT"); env != "" {
 		return env
+	}
+	if me := icMe(); me != "" { // this agent session's intercom name
+		return me
+	}
+	if os.Getenv("CLAUDECODE") == "1" {
+		return "claude"
 	}
 	return "human"
 }
@@ -330,9 +338,7 @@ func setStatus(a *Args, status, notePrefix string) {
 	old := n.Status
 	n.Status = status
 	if status == "working" {
-		if a.Has("by") {
-			n.Agent = a.Get("by", "")
-		}
+		n.Agent = who(a)
 		n.Base = codeHead(loadConfig(g.Dir)) // "auto" touches diff from here
 	}
 	recordCode(g, n, a.All("touches"))
@@ -347,6 +353,16 @@ func setStatus(a *Args, status, notePrefix string) {
 	appendLog(n, msg, who(a))
 	g.mutate(n)
 	fmt.Printf("%s: %s\n", i, label(status))
+	if status != "working" {
+		what := "set it to " + label(status)
+		if old == "ready" && status == "open" || old == "done" && status == "open" {
+			what = "sent it back to Open"
+		}
+		if text != "" {
+			what += ": " + text
+		}
+		tell(g, n, who(a), what, status == "open")
+	}
 }
 
 func statusCmd(status string) func(*Args) {
@@ -377,6 +393,7 @@ func cmdClaim(a *Args) {
 		die("%s is only proposed; a human has to `ct accept` it first", i)
 	}
 	setStatus(a, "working", "")
+	warnOverlap(load(g.Dir), i, who(a))
 }
 
 func cmdAsk(a *Args) {
@@ -391,6 +408,7 @@ func cmdNote(a *Args) {
 	i := g.resolve(a.Pos[0])
 	appendLog(g.Nodes[i], strings.Join(a.Pos[1:], " "), who(a))
 	g.mutate(g.Nodes[i])
+	tell(g, g.Nodes[i], who(a), "noted: "+strings.Join(a.Pos[1:], " "), false)
 }
 
 func cmdLink(a *Args) {

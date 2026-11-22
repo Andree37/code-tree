@@ -26,6 +26,7 @@ func cmdAccept(a *Args) {
 	appendLog(n, msg, who(a))
 	g.mutate(n)
 	fmt.Printf("%s: Open\n", i)
+	tell(g, n, who(a), "accepted it; it can be claimed now", false)
 }
 
 func cmdReject(a *Args) {
@@ -44,6 +45,7 @@ func cmdReject(a *Args) {
 	appendLog(n, msg, who(a))
 	g.mutate(n)
 	fmt.Printf("%s: Dropped\n", i)
+	tell(g, n, who(a), strings.Replace(msg, "rejected", "rejected it", 1), false)
 }
 
 func cmdMerge(a *Args) {
@@ -172,6 +174,16 @@ func addDecision(a *Args, cmd, prefix string) {
 	}
 	appendLog(n, prefix+d, who(a))
 	g.mutate(n)
+	if cmd == "answer" {
+		tell(g, n, who(a), "answered: "+d, true)
+	} else {
+		tell(g, n, who(a), "decided: "+d, false)
+		for c := range g.descendants(i) { // decisions bind everything below
+			if g.Info[c].State == "working" {
+				tell(g, g.Nodes[c], who(a), "decided on `"+i+"` above you: "+d, false)
+			}
+		}
+	}
 	fmt.Printf("%s: %s · decision recorded for it and everything below\n", i, label(n.Status))
 }
 
