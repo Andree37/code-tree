@@ -111,6 +111,7 @@ func (g *Graph) mermaid(ids []string) string {
 		"  classDef working stroke:#4a90d9,stroke-width:2px",
 		"  classDef needsyou stroke:#ff6a00,stroke-width:2px",
 		"  classDef ready stroke:#ff6a00,stroke-width:2px",
+		"  classDef stale stroke:#d93f3f,stroke-width:2px,stroke-dasharray:4",
 		"  classDef done opacity:0.5",
 		"  classDef dropped opacity:0.3",
 	)
@@ -146,15 +147,41 @@ func writeGraphMD(dir string) {
 		w("_Nothing actionable._")
 	}
 	w("")
+	if st := readSync(dir); st.Head != "" {
+		cfg := loadConfig(dir)
+		w("## Code sync\n")
+		w("Last `ct sync`: `%s` in `%s` at %s.\n", short(st.Head), cfg.Raw, st.Synced)
+		var stale []string
+		for _, i := range g.IDs {
+			if s := g.Nodes[i].Stale; len(s) > 0 {
+				stale = append(stale, fmt.Sprintf("- `%s` %s — changed: %s", i, g.Nodes[i].Title, strings.Join(s, ", ")))
+			}
+		}
+		if len(stale) > 0 {
+			w("**Stale** (resolved, but their code changed since; recheck, then `ct ack` or reopen):\n")
+			w("%s\n", strings.Join(stale, "\n"))
+		}
+		if len(st.Unmapped) > 0 {
+			w("**Unmapped changes** (no node touches these; `ct touch <id> <path>` to own them):\n")
+			for k, p := range st.Unmapped {
+				if k == 30 {
+					w("- … %d more in `.tree/sync.json`", len(st.Unmapped)-30)
+					break
+				}
+				w("- `%s`", p)
+			}
+			w("")
+		}
+	}
 	for _, h := range g.heads() {
 		ids := g.bfs(h)
 		w("## HEAD `%s` — %s · %d nodes · %s\n", h, g.Nodes[h].Title, len(ids), g.Info[h].Label)
 		w("```mermaid\n%s\n```\n", g.mermaid(ids))
-		w("| id | state | title | waits on | blocks | unblocks | mode · agent | outcome |")
-		w("|---|---|---|---|---|---|---|---|")
+		w("| id | state | title | waits on | blocks | unblocks | mode · agent | touches | outcome |")
+		w("|---|---|---|---|---|---|---|---|---|")
 		for _, i := range ids {
 			n, f := g.Nodes[i], g.Info[i]
-			w("| `%s` | %s | %s | %s | %s | %d | %s | %s |", i, f.Label, n.Title, orDash(f.Children), orDash(f.Parents), f.Unblocks, modeAgent(n), n.Outcome)
+			w("| `%s` | %s | %s | %s | %s | %d | %s | %s | %s |", i, f.Label, n.Title, orDash(f.Children), orDash(f.Parents), f.Unblocks, modeAgent(n), strings.Join(n.Touches, ", "), n.Outcome)
 		}
 		w("")
 	}

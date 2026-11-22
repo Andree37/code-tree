@@ -19,7 +19,7 @@ touching code, and keep the graph honest while you work.
   before you start.
 
 ## Working loop
-1. `ct next --for agent` lists unblocked, unclaimed work by leverage.
+1. `ct sync`, then `ct next --for agent` lists unblocked, unclaimed work by leverage.
 2. `ct claim <id> --by <your-name>` marks it working so nobody else takes it.
 3. Found a prerequisite that must be settled first?
    `ct add "<title>" --blocks <id> -d "<context>"`. The parent becomes Waiting.
@@ -30,6 +30,18 @@ touching code, and keep the graph honest while you work.
 6. Finished: `ct ready <id> --outcome "<one-line result>"` so a human reviews it,
    or `ct done <id> --outcome "..."` when the user said no review is needed.
    The outcome is what parents and other agents will see, so make it self-contained.
+
+## Code
+- The tree describes the code repo named in `.tree/config` (`code = ...`). It only
+  reads that repo; never add hooks, trailers or tree files to it.
+- Say which code a node owns: `--touches src/std/map.zig` (or `dir/`, globs) on
+  `add` / `ready` / `done`, or `ct touch <id> <paths>`. `--touches auto` records
+  everything changed since you claimed the node.
+- Run `ct sync` before `ct next`. It diffs the code since the last sync and marks
+  resolved nodes whose files changed as **Stale**. Recheck a stale node: if its
+  outcome still holds, `ct ack <id> --note "why"`; if not, `ct open <id>` and fix it.
+- Changes no node owns are listed as unmapped in `.tree/GRAPH.md`. Attach them to the
+  right node with `ct touch`, or add a node for them.
 
 ## Rules
 - Never mark something done that you did not verify.

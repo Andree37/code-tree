@@ -106,19 +106,21 @@ var (
 	fOutcome = flagSpec{"outcome", "o", true, "one-line result other nodes will see"}
 	fNote    = flagSpec{"note", "", true, "log message"}
 	fNoOpen  = flagSpec{"no-open", "", false, "do not open a browser"}
+	fTouches = flagSpec{"touches", "t", true, "code paths/patterns this node owns (repeatable, comma ok; 'auto' = changed since claim)"}
 )
 
 var commands []command
 
 func init() {
 	commands = []command{
-		{"init", "", "create .tree/ in the current directory", nil, cmdInit},
+		{"init", "", "create .tree/ in the current directory", []flagSpec{{"code", "", true, "path of the code repo (default: this directory)"}}, cmdInit},
 		{"add", "TITLE", "add a node (a HEAD if it blocks nothing)", []flagSpec{
 			{"blocks", "b", true, "node that waits on this one (repeatable)"},
 			{"desc", "d", true, "context: what and why"},
 			{"mode", "m", true, "discuss | research | build | review | fix (free text, default build)"},
 			{"agent", "a", true, "assigned agent or person"},
 			{"status", "s", true, "initial status (default open)"},
+			fTouches,
 			fBy,
 		}, cmdAdd},
 		{"ls", "[HEAD]", "print the tree(s)", []flagSpec{{"all", "", false, "include resolved nodes and heads"}, fJSON}, cmdLs},
@@ -148,11 +150,17 @@ func init() {
 		}, cmdGraph},
 		{"view", "", "write .tree/graph.html and open it", []flagSpec{fNoOpen}, cmdView},
 		{"serve", "", "live graph view in the browser", []flagSpec{{"port", "p", true, "port (default 7337)"}, fNoOpen}, cmdServe},
+		{"touch", "ID PATH...", "set code paths a node owns ('dir/', globs, 'auto')", []flagSpec{{"rm", "", false, "remove these paths instead"}}, cmdTouch},
+		{"sync", "", "catch up with code changes since the last sync (read-only git)", []flagSpec{
+			{"check", "", false, "exit 1 if anything is stale or unmapped (for CI)"},
+			{"dry-run", "", false, "report without writing"},
+		}, cmdSync},
+		{"ack", "ID", "mark a stale node as still valid after code changes", []flagSpec{fNote, fOutcome, fBy}, cmdAck},
 		{"prompt", "", "print the agent protocol", nil, func(*Args) { fmt.Print(protocol) }},
 	}
 }
 
-func statusFlags() []flagSpec { return []flagSpec{fOutcome, fNote, fForce, fBy} }
+func statusFlags() []flagSpec { return []flagSpec{fOutcome, fNote, fTouches, fForce, fBy} }
 
 func usage() {
 	fmt.Print("ct — code-tree: dependency graph of work for humans and agents\n\nusage: ct <command> [args]\n\n")
@@ -207,11 +215,20 @@ func appendLog(n *Node, text, by string) {
 
 func oneLine(s string) string { return strings.ReplaceAll(s, "\n", " ") }
 
-func cmdInit(*Args) {
+func cmdInit(a *Args) {
 	cwd, _ := os.Getwd()
 	root := filepath.Join(cwd, treeDir)
 	if err := os.MkdirAll(filepath.Join(root, "nodes"), 0o755); err != nil {
 		die("%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config")); err != nil || a.Has("code") {
+		cfg := defaultConfig
+		if c := a.Get("code", ""); c != "" {
+			cfg = strings.Replace(cfg, "code = .", "code = "+c, 1)
+		}
+		if err := os.WriteFile(filepath.Join(root, "config"), []byte(cfg), 0o644); err != nil {
+			die("%v", err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "PROTOCOL.md"), []byte(protocol), 0o644); err != nil {
 		die("%v", err)
@@ -253,6 +270,7 @@ func cmdAdd(a *Args) {
 	if n.Blocks == nil {
 		n.Blocks = []string{}
 	}
+	recordCodeTouches(g, n, a.All("touches"))
 	appendLog(n, "created", who(a))
 	changed := []*Node{n}
 	for _, p := range parents { // a new child reopens a resolved/ready parent
@@ -276,9 +294,13 @@ func setStatus(a *Args, status, notePrefix string) {
 	}
 	old := n.Status
 	n.Status = status
-	if status == "working" && a.Has("by") {
-		n.Agent = a.Get("by", "")
+	if status == "working" {
+		if a.Has("by") {
+			n.Agent = a.Get("by", "")
+		}
+		n.Base = codeHead(loadConfig(g.Dir)) // "auto" touches diff from here
 	}
+	recordCode(g, n, a.All("touches"))
 	if o := a.Get("outcome", ""); o != "" {
 		n.Outcome = oneLine(o)
 	}
@@ -453,6 +475,15 @@ func cmdShow(a *Args) {
 	}
 	if n.Outcome != "" {
 		fmt.Println("  outcome:", n.Outcome)
+	}
+	if len(n.Touches) > 0 {
+		fmt.Println("  touches:", strings.Join(n.Touches, ", "))
+	}
+	if n.At != "" {
+		fmt.Println("  resolved at:", short(n.At))
+	}
+	if len(n.Stale) > 0 {
+		fmt.Println("  STALE, code changed since:", strings.Join(n.Stale, ", "))
 	}
 	if len(chain) > 0 {
 		fmt.Println("\nWhy (chain to head):")

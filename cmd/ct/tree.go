@@ -18,6 +18,7 @@ var (
 	statuses = []string{"open", "working", "needs-you", "ready", "done", "dropped"}
 	labels   = map[string]string{
 		"waiting":   "Waiting",
+		"stale":     "Stale",
 		"open":      "Open",
 		"working":   "Working",
 		"needs-you": "Needs you",
@@ -41,6 +42,9 @@ func label(s string) string {
 type Node struct {
 	ID, Title, Mode, Agent, Status, Outcome, Created, Updated string
 	Blocks                                                    []string
+	Touches                                                   []string          // code paths/patterns this node owns
+	Stale                                                     []string          // paths changed since it was resolved
+	At, Base                                                  string            // code commit at resolution / at claim
 	Extra                                                     map[string]string // unknown fields, kept verbatim
 	Body                                                      string
 }
@@ -68,6 +72,15 @@ func die(format string, a ...any) {
 }
 
 func findTree() string {
+	if env := os.Getenv("CT_TREE"); env != "" { // tree kept outside the code repo
+		if filepath.Base(env) != treeDir {
+			env = filepath.Join(env, treeDir)
+		}
+		if st, err := os.Stat(filepath.Join(env, "nodes")); err == nil && st.IsDir() {
+			return env
+		}
+		die("CT_TREE=%s has no nodes/ directory", env)
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		die("%v", err)
@@ -136,12 +149,23 @@ func parseNode(text, path string) *Node {
 			n.Created = str
 		case "updated":
 			n.Updated = str
-		case "blocks":
+		case "at":
+			n.At = str
+		case "base":
+			n.Base = str
+		case "blocks", "touches", "stale":
 			var list []string
 			if strings.HasPrefix(v, "[") && json.Unmarshal([]byte(v), &list) == nil {
-				n.Blocks = list
 			} else if str != "" {
-				n.Blocks = []string{str}
+				list = []string{str}
+			}
+			switch k {
+			case "blocks":
+				n.Blocks = list
+			case "touches":
+				n.Touches = list
+			default:
+				n.Stale = list
 			}
 		default:
 			n.Extra[k] = v
@@ -176,6 +200,19 @@ func dumpNode(n *Node) string {
 	b.WriteString("---\n")
 	for _, k := range fieldOrder {
 		fmt.Fprintf(&b, "%s: %s\n", k, vals[k])
+	}
+	// code-sync fields only appear once used, so plain trees stay plain
+	if len(n.Touches) > 0 {
+		fmt.Fprintf(&b, "touches: %s\n", jsonStr(n.Touches))
+	}
+	if len(n.Stale) > 0 {
+		fmt.Fprintf(&b, "stale: %s\n", jsonStr(n.Stale))
+	}
+	if n.Base != "" {
+		fmt.Fprintf(&b, "base: %s\n", n.Base)
+	}
+	if n.At != "" {
+		fmt.Fprintf(&b, "at: %s\n", n.At)
 	}
 	extra := make([]string, 0, len(n.Extra))
 	for k := range n.Extra {
@@ -311,6 +348,8 @@ func (g *Graph) compute() {
 		}
 		if !resolved(n.Status) && done < len(f.Children) {
 			f.State, f.Label = "waiting", fmt.Sprintf("Waiting %d/%d", done, len(f.Children))
+		} else if resolved(n.Status) && len(n.Stale) > 0 {
+			f.State, f.Label = "stale", "Stale"
 		} else {
 			f.State, f.Label = n.Status, label(n.Status)
 		}
@@ -397,10 +436,10 @@ func (g *Graph) heads() []string {
 func (g *Graph) actionable(who string) []string {
 	want := map[string]map[string]bool{
 		"agent": {"open": true},
-		"human": {"needs-you": true, "ready": true},
-		"all":   {"open": true, "needs-you": true, "ready": true},
+		"human": {"needs-you": true, "stale": true, "ready": true},
+		"all":   {"open": true, "needs-you": true, "stale": true, "ready": true},
 	}[who]
-	rank := map[string]int{"needs-you": 0, "ready": 1, "open": 2}
+	rank := map[string]int{"needs-you": 0, "stale": 1, "ready": 2, "open": 3}
 	var ids []string
 	for _, i := range g.IDs {
 		if want[g.Info[i].State] {
@@ -436,6 +475,9 @@ type NodeJSON struct {
 	WaitsOn  []string   `json:"waits_on"`
 	Unblocks int        `json:"unblocks"`
 	Heads    []string   `json:"heads"`
+	Touches  []string   `json:"touches"`
+	Stale    []string   `json:"stale"`
+	At       string     `json:"at"`
 	Created  string     `json:"created"`
 	Updated  string     `json:"updated"`
 	Body     *string    `json:"body,omitempty"`
@@ -449,6 +491,7 @@ func (g *Graph) nodeJSON(i string, full bool) NodeJSON {
 		ID: i, Title: n.Title, Kind: f.Kind, Status: n.Status, State: f.State, Label: f.Label,
 		Mode: n.Mode, Agent: n.Agent, Outcome: n.Outcome, Blocks: f.Parents, WaitsOn: f.Children,
 		Unblocks: f.Unblocks, Heads: g.headsOf(i), Created: n.Created, Updated: n.Updated,
+		Touches: nonNil(n.Touches), Stale: nonNil(n.Stale), At: n.At,
 	}
 	if full {
 		body := n.Body
@@ -468,6 +511,13 @@ func (g *Graph) graphJSON(full bool) GraphJSON {
 		out.Nodes = append(out.Nodes, g.nodeJSON(i, full))
 	}
 	return out
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func printJSON(v any) {
