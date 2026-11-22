@@ -34,7 +34,8 @@ conflict in git. Agents can read the graph three ways, from cheapest to richest:
 ## Install
 
 ```sh
-go install ./cmd/ct          # from a checkout; puts `ct` in $(go env GOPATH)/bin
+go install github.com/Andree37/code-tree/cmd/ct@latest
+# or from a checkout: go install ./cmd/ct
 ```
 
 One static binary with no dependencies beyond the Go standard library. The web page and the agent
