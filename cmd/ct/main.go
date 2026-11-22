@@ -150,6 +150,8 @@ func init() {
 		{"chat", "ID [MESSAGE]", "talk to the chat agent about a node (no message: print the chat)", []flagSpec{fBy}, cmdChat},
 		{"talk", "ID TEXT", "message the agent on a node (its owner, else the agent in this herdr tab) via intercom", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdTalk},
 		{"work", "ID", "ask the agent in this tab (or --to) to work on a node now", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdWork},
+		{"run", "ID", "start a new agent on an open node in its own herdr tab", []flagSpec{{"agent", "", true, "agent command (default claude)"}, fForce, fBy}, cmdRun},
+		{"watch", "", "live view of the tree for a pane beside your agent (single-key actions)", nil, cmdWatch},
 		{"note", "ID TEXT", "append to a node's log", []flagSpec{fBy}, cmdNote},
 		{"link", "CHILD PARENT", "make CHILD block PARENT", []flagSpec{fBy}, cmdLink},
 		{"unlink", "CHILD PARENT", "remove CHILD → PARENT", []flagSpec{fBy}, cmdUnlink},

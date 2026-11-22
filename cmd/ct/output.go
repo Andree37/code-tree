@@ -223,7 +223,9 @@ func actionArgs(action, id, text string) ([]string, bool) {
 		return append(args, "--", id)
 	}
 	switch action {
-	case "answer", "decide", "note", "chat":
+	case "work", "run":
+		return append(append([]string{action}, by...), "--", id), true
+	case "answer", "decide", "note", "chat", "talk":
 		if text == "" {
 			return nil, false
 		}
