@@ -22,9 +22,10 @@ import (
 // ---------------------------------------------------------------- config
 
 type Config struct {
-	Code   string   // absolute path of the code repo
-	Raw    string   // code path as written in the config
-	Ignore []string // patterns never reported as unmapped
+	Code    string   // absolute path of the code repo
+	Raw     string   // code path as written in the config
+	Ignore  []string // patterns never reported as unmapped
+	Approve string   // "agents": nodes added by agents start proposed; "none": no approval step
 }
 
 const defaultConfig = `# code-tree config
@@ -33,11 +34,14 @@ const defaultConfig = `# code-tree config
 code = .
 # ignore: comma-separated patterns that never count as unmapped changes.
 ignore = go.sum, *.lock, package-lock.json
+# approve: agents = nodes an agent adds start as Proposed until you accept them
+#          none   = agents add open nodes directly
+approve = agents
 `
 
 func loadConfig(tree string) Config {
 	base := filepath.Dir(tree)
-	cfg := Config{Code: base, Raw: "."}
+	cfg := Config{Code: base, Raw: ".", Approve: "agents"}
 	f, err := os.Open(filepath.Join(tree, "config"))
 	if err != nil {
 		return cfg
@@ -58,6 +62,8 @@ func loadConfig(tree string) Config {
 				v = filepath.Join(base, v)
 			}
 			cfg.Code = filepath.Clean(v)
+		case "approve":
+			cfg.Approve = v
 		case "ignore":
 			for _, p := range strings.Split(v, ",") {
 				if p = strings.TrimSpace(p); p != "" {

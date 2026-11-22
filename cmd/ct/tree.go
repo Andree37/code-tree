@@ -13,13 +13,14 @@ import (
 const treeDir = ".tree"
 
 var (
-	statuses = []string{"open", "working", "needs-you", "ready", "done", "dropped"}
+	statuses = []string{"proposed", "open", "working", "needs-you", "ready", "done", "dropped"}
 	labels   = map[string]string{
 		"waiting":   "Waiting",
 		"stale":     "Stale",
 		"open":      "Open",
 		"working":   "Working",
 		"needs-you": "Needs you",
+		"proposed":  "Proposed",
 		"ready":     "Ready",
 		"done":      "Done",
 		"dropped":   "Dropped",
@@ -349,7 +350,9 @@ func (g *Graph) compute() {
 				done++
 			}
 		}
-		if !resolved(n.Status) && done < len(f.Children) {
+		if n.Status == "proposed" {
+			f.State, f.Label = "proposed", "Proposed"
+		} else if !resolved(n.Status) && done < len(f.Children) {
 			f.State, f.Label = "waiting", fmt.Sprintf("Waiting %d/%d", done, len(f.Children))
 		} else if resolved(n.Status) && len(n.Stale) > 0 {
 			f.State, f.Label = "stale", "Stale"
@@ -439,10 +442,10 @@ func (g *Graph) heads() []string {
 func (g *Graph) actionable(who string) []string {
 	want := map[string]map[string]bool{
 		"agent": {"open": true},
-		"human": {"needs-you": true, "stale": true, "ready": true},
-		"all":   {"open": true, "needs-you": true, "stale": true, "ready": true},
+		"human": {"needs-you": true, "proposed": true, "stale": true, "ready": true},
+		"all":   {"open": true, "needs-you": true, "proposed": true, "stale": true, "ready": true},
 	}[who]
-	rank := map[string]int{"needs-you": 0, "stale": 1, "ready": 2, "open": 3}
+	rank := map[string]int{"needs-you": 0, "proposed": 1, "stale": 2, "ready": 3, "open": 4}
 	var ids []string
 	for _, i := range g.IDs {
 		if want[g.Info[i].State] {

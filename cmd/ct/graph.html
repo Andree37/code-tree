@@ -124,7 +124,7 @@ const store = { get(k) { try { return localStorage.getItem(k); } catch { return 
                 set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
 
 const byId = () => Object.fromEntries(DATA.nodes.map((n) => [n.id, n]));
-const HOT = new Set(["needs-you", "ready", "stale"]);
+const HOT = new Set(["needs-you", "proposed", "ready", "stale"]);
 const RES = new Set(["done", "dropped"]);
 
 function subgraph(head, idx) {
@@ -187,7 +187,7 @@ function render() {
   if (selected) open(selected, true);
 }
 
-const RANK = { "needs-you": 0, stale: 1, ready: 2, open: 3 };
+const RANK = { "needs-you": 0, proposed: 1, stale: 2, ready: 3, open: 4 };
 function actionableList() {
   return DATA.nodes.filter((n) => n.state in RANK)
     .sort((a, b) => RANK[a.state] - RANK[b.state] || b.unblocks - a.unblocks || a.created.localeCompare(b.created));
@@ -200,7 +200,7 @@ function renderList(idx) {
   const click = (el, id) => { el.onclick = (e) => { e.stopPropagation(); open(id); }; };
   if (tab === "next") {
     const rows = document.createElement("div"); rows.className = "rows";
-    const groups = [["needs-you", "Needs you"], ["stale", "Stale: code changed since resolved"], ["ready", "Ready for review"], ["open", "Open for agents"]];
+    const groups = [["needs-you", "Needs you"], ["proposed", "Proposed by agents: accept, merge or reject"], ["stale", "Stale: code changed since resolved"], ["ready", "Ready for review"], ["open", "Open for agents"]];
     const items = actionableList();
     if (!items.length) rows.innerHTML = '<p class="group">Nothing actionable.</p>';
     for (const [st, name] of groups) {
@@ -220,7 +220,7 @@ function renderList(idx) {
     }
     L.appendChild(rows);
   } else {
-    const cols = [["needs-you", "Needs you"], ["stale", "Stale"], ["ready", "Ready"], ["working", "Working"], ["open", "Open"], ["waiting", "Waiting"], ["done", "Done"]];
+    const cols = [["needs-you", "Needs you"], ["proposed", "Proposed"], ["stale", "Stale"], ["ready", "Ready"], ["working", "Working"], ["open", "Open"], ["waiting", "Waiting"], ["done", "Done"]];
     const board = document.createElement("div"); board.className = "board";
     for (const [st, name] of cols) {
       const g = DATA.nodes.filter((n) => n.state === st || (st === "done" && RES.has(n.state)))
@@ -256,7 +256,7 @@ function renderGraph(idx) {
   document.querySelector(".empty")?.remove();
 
   const cnt = (s) => DATA.nodes.filter((n) => n.state === s).length;
-  $("#stats").innerHTML = `<b>${cnt("needs-you")}</b> needs you · ${cnt("stale") ? `<b>${cnt("stale")}</b> stale · ` : ""}<b>${cnt("ready")}</b> ready · ${cnt("open")} open · ${cnt("working")} working`;
+  $("#stats").innerHTML = `<b>${cnt("needs-you")}</b> needs you · ${cnt("proposed") ? `<b>${cnt("proposed")}</b> proposed · ` : ""}${cnt("stale") ? `<b>${cnt("stale")}</b> stale · ` : ""}<b>${cnt("ready")}</b> ready · ${cnt("open")} open · ${cnt("working")} working`;
 
   if (!heads.length) {
     const e = document.createElement("div"); e.className = "empty";

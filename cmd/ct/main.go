@@ -136,6 +136,9 @@ func init() {
 		{"drop", "ID", "mark a node dropped", statusFlags(), statusCmd("dropped")},
 		{"open", "ID", "mark a node open", statusFlags(), statusCmd("open")},
 		{"set", "ID STATUS", "set any status: " + strings.Join(statuses, " | "), statusFlags(), cmdSet},
+		{"accept", "ID", "accept a proposed node (it becomes open)", []flagSpec{fNote, fBy}, cmdAccept},
+		{"reject", "ID [REASON]", "reject a proposed node (it becomes dropped)", []flagSpec{fBy}, cmdReject},
+		{"merge", "ID INTO", "fold a node into another one and drop it", []flagSpec{fBy}, cmdMerge},
 		{"note", "ID TEXT", "append to a node's log", []flagSpec{fBy}, cmdNote},
 		{"link", "CHILD PARENT", "make CHILD block PARENT", []flagSpec{fBy}, cmdLink},
 		{"unlink", "CHILD PARENT", "remove CHILD → PARENT", []flagSpec{fBy}, cmdUnlink},
@@ -250,6 +253,9 @@ func cmdAdd(a *Args) {
 	if !slices.Contains(statuses, status) {
 		die("status must be one of %s", strings.Join(statuses, ", "))
 	}
+	if who(a) != "human" && loadConfig(g.Dir).Approve != "none" {
+		status = "proposed" // agents propose; a human accepts (see `ct accept`)
+	}
 	base := slugify(title)
 	id := base
 	for k := 2; g.Nodes[id] != nil; k++ {
@@ -334,6 +340,9 @@ func cmdClaim(a *Args) {
 	}
 	if f.State == "waiting" && !a.Bool("force") {
 		die("%s is %s; pick something from `ct next`", i, f.Label)
+	}
+	if f.State == "proposed" {
+		die("%s is only proposed; a human has to `ct accept` it first", i)
 	}
 	setStatus(a, "working", "")
 }

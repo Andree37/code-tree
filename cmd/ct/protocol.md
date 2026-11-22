@@ -23,7 +23,9 @@ touching code, and keep the graph honest while you work.
 2. `ct claim <id> --by <your-name>` marks it working so nobody else takes it.
 3. Found a prerequisite that must be settled first?
    `ct add "<title>" --blocks <id> -d "<context>"`. The parent becomes Waiting.
-   Keep nodes small: one question or one change each.
+   Nodes you add start as **Proposed**: a human accepts, merges or rejects them.
+   You cannot claim a proposed node, and you must never `ct accept` your own.
+   Keep nodes small: one question or one change each, and propose few.
 4. Need a human decision? `ct ask <id> "<question with options and your recommendation>"`.
    The node becomes **Needs you**. Stop working on it and pick other work.
 5. Log progress: `ct note <id> "<what you did / learned>"`.
