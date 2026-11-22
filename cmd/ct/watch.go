@@ -67,7 +67,7 @@ func cmdWatch(a *Args) {
 
 	keys := make(chan []byte, 16)
 	go func() {
-		buf := make([]byte, 64)
+		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if err != nil {
@@ -82,6 +82,8 @@ func cmdWatch(a *Args) {
 	tick := time.NewTicker(800 * time.Millisecond)
 	defer tick.Stop()
 
+	in := newPaneInput()
+	wkey := func(k string) bool { return w.key([]byte(k)) }
 	w.size()
 	w.reload()
 	w.render()
@@ -91,7 +93,11 @@ func cmdWatch(a *Args) {
 			if !ok {
 				return
 			}
-			if !feed(k, func() bool { return w.inputOn }, func(key string) bool { return w.key([]byte(key)) }) {
+			if !in.read(k, wkey, w.paste) {
+				return
+			}
+		case <-in.wait.C:
+			if !in.settle(wkey, w.paste) {
 				return
 			}
 		case s := <-sigs:
@@ -121,12 +127,14 @@ func stty(args ...string) {
 
 func (w *watcher) setup() {
 	stty("-icanon", "-echo", "min", "1")
-	fmt.Print("\x1b[?1049h\x1b[?25l")
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?2004h") // alternate screen, no cursor, bracketed paste
 }
 
 func (w *watcher) restore() {
-	fmt.Print("\x1b[?25h\x1b[?1049l")
+	waitChildren(5 * time.Second) // an action still running finishes first
+	fmt.Print("\x1b[?2004l\x1b[?25h\x1b[?1049l")
 	stty(w.stty)
+	flushInput(os.Stdin.Fd()) // keys typed for the pane never reach the shell
 }
 
 func (w *watcher) size() {
@@ -165,6 +173,7 @@ func (w *watcher) unreadHuman() int {
 
 func (w *watcher) reload() {
 	w.g = load(w.tree)
+	cleanGraph(w.g) // what agents wrote never reaches the terminal raw
 	w.sig = w.signature()
 	w.humanMails = w.unreadHuman()
 	w.rows = nil
@@ -388,17 +397,21 @@ func (w *watcher) bg(action, id, text string) {
 		return
 	}
 	w.msg = action + "…"
+	children.Add(1)
 	go func() {
+		defer children.Done()
 		out, _ := runSelf(w.tree, args)
-		w.results <- lastLines(out, 1)
+		report(w.results, lastLines(out, 1))
 	}()
 }
 
 func (w *watcher) do(msg string, args ...string) {
 	w.msg = msg
+	children.Add(1)
 	go func() {
+		defer children.Done()
 		out, _ := runSelf(w.tree, args)
-		w.results <- lastLines(out, 1)
+		report(w.results, lastLines(out, 1))
 	}()
 }
 
@@ -622,56 +635,12 @@ func (w *watcher) keysFor() string {
 	return "t talk · c decide · + sub-task · ? help"
 }
 
-// splitKeys breaks one read into separate keys: escape sequences (arrows)
-// stay whole, everything else is one rune each, so fast typing never merges keys.
-func splitKeys(b []byte) []string {
-	var keys []string
-	for i := 0; i < len(b); {
-		if b[i] == 0x1b && i+2 < len(b) && b[i+1] == '[' {
-			j := i + 2
-			for j < len(b) && (b[j] < 0x40 || b[j] > 0x7e) {
-				j++
-			}
-			if j < len(b) {
-				j++
-			}
-			keys = append(keys, string(b[i:j]))
-			i = j
-			continue
-		}
-		r, size := utf8.DecodeRune(b[i:])
-		if r == utf8.RuneError && size <= 1 {
-			size = 1
-		}
-		keys = append(keys, string(b[i:i+size]))
-		i += size
+// paste puts pasted text into the open prompt; with no prompt open it is
+// ignored, never run as keys.
+func (w *watcher) paste(text string) {
+	if !w.inputOn {
+		w.msg = "paste ignored: press a key that asks for text first"
+		return
 	}
-	return keys
-}
-
-// pasteKey: while typing, a line break that arrives with more text in the same
-// read is part of a paste, so it becomes a space instead of Enter.
-func pasteKey(typing bool, key string, idx, n int) string {
-	if typing && (key == "\r" || key == "\n") && idx < n-1 {
-		return " "
-	}
-	return key
-}
-
-// feed hands one terminal read to a pane key by key. Pasted text stays text:
-// line breaks inside it become spaces, and once Enter submits what was typed,
-// the rest of that read is dropped instead of being run as hotkeys. It
-// returns false when the pane should close.
-func feed(read []byte, typing func() bool, key func(string) bool) bool {
-	keys := splitKeys(read)
-	for idx, one := range keys {
-		wasTyping := typing()
-		if !key(pasteKey(wasTyping, one, idx, len(keys))) {
-			return false
-		}
-		if wasTyping && !typing() {
-			break
-		}
-	}
-	return true
+	w.input = append(w.input, []rune(pasteText(text))...)
 }

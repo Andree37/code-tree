@@ -9,38 +9,6 @@ import (
 	"time"
 )
 
-// Pasting "answer\nmore text" must not run "more text" as hotkeys.
-func TestPasteNeverBecomesHotkeys(t *testing.T) {
-	var ran []string
-	typing := true
-	var input []string
-	key := func(k string) bool {
-		if typing {
-			if k == "\r" || k == "\n" {
-				typing = false // submitted
-				return true
-			}
-			input = append(input, k)
-			return true
-		}
-		ran = append(ran, k) // a hotkey
-		return true
-	}
-	feed([]byte("Use option B\ndrop the old flag\r"), func() bool { return typing }, key)
-	if len(ran) != 0 {
-		t.Fatalf("pasted text ran as hotkeys: %q", ran)
-	}
-	if got := strings.Join(input, ""); got != "Use option B drop the old flag" {
-		t.Fatalf("input = %q", got)
-	}
-	// Enter followed by more keys in the same read: the rest is dropped
-	typing, ran, input = true, nil, nil
-	feed([]byte("yes\rdq"), func() bool { return typing }, key)
-	if len(ran) != 0 {
-		t.Fatalf("keys after Enter ran: %q", ran)
-	}
-}
-
 // Stray files in nodes/ (editor locks, macOS ._ files, notes) are skipped.
 func TestStrayFilesDoNotBreakCT(t *testing.T) {
 	dir := newTree(t)

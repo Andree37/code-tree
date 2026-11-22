@@ -73,18 +73,20 @@ func cmdSee(a *Args) {
 	}
 	s := &seer{session: id, auto: a.Get("session", "") == "", stty: strings.TrimSpace(string(saved)), results: make(chan string, 8)}
 	stty("-icanon", "-echo", "min", "1")
-	fmt.Print("\x1b[?1049h\x1b[?25l")
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?2004h") // alternate screen, no cursor, bracketed paste
 	defer func() {
+		waitChildren(5 * time.Second) // a message being sent finishes first
 		if s.serve != nil && s.serve.Process != nil {
 			_ = s.serve.Process.Kill()
 		}
-		fmt.Print("\x1b[?25h\x1b[?1049l")
+		fmt.Print("\x1b[?2004l\x1b[?25h\x1b[?1049l")
 		stty(s.stty)
+		flushInput(os.Stdin.Fd()) // keys typed for the pane never reach the shell
 	}()
 
 	keys := make(chan []byte, 16)
 	go func() {
-		buf := make([]byte, 64)
+		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if err != nil {
@@ -99,6 +101,7 @@ func cmdSee(a *Args) {
 	tick := time.NewTicker(800 * time.Millisecond)
 	defer tick.Stop()
 
+	in := newPaneInput()
 	s.size()
 	s.reload()
 	s.render()
@@ -108,7 +111,11 @@ func cmdSee(a *Args) {
 			if !ok {
 				return
 			}
-			if !feed(k, func() bool { return s.inputOn }, s.key) {
+			if !in.read(k, s.key, s.paste) {
+				return
+			}
+		case <-in.wait.C:
+			if !in.settle(s.key, s.paste) {
 				return
 			}
 		case sg := <-sigs:
@@ -213,6 +220,7 @@ func (s *seer) reload() {
 	}
 	s.tree = pkgTree(s.root, s.pkg)
 	s.g = load(s.tree)
+	cleanGraph(s.g) // what agents wrote never reaches the terminal raw
 	heads := s.g.heads()
 	cur := s.st["current"]
 	// follow Claude: show the topic it is in, and select its thread when it moves
@@ -800,12 +808,14 @@ func (s *seer) send(text string) {
 		return
 	}
 	s.msg = "sending…"
+	children.Add(1)
 	go func() {
+		defer children.Done()
 		cmd := exec.Command(bin, "send", "--topic", "code-tree", "--", s.session, text)
 		cmd.Env = append(os.Environ(), "IC_ID=", "CLAUDECODE=")
 		out, _ := cmd.CombinedOutput()
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		s.results <- strings.TrimPrefix(lines[len(lines)-1], "ic: ")
+		report(s.results, strings.TrimPrefix(lines[len(lines)-1], "ic: "))
 	}()
 }
 
@@ -1009,4 +1019,14 @@ func (s *seer) toggleWaiting() {
 	})
 	g.mutate(changed...)
 	s.reload()
+}
+
+// paste puts pasted text into the open prompt; with no prompt open it is
+// ignored, never run as keys.
+func (s *seer) paste(text string) {
+	if !s.inputOn {
+		s.msg = "paste ignored: press t first to type a message"
+		return
+	}
+	s.input = append(s.input, []rune(pasteText(text))...)
 }
