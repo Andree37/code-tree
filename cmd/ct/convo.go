@@ -605,6 +605,7 @@ func cmdHook(a *Args) {
 		SessionID      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
 		Cwd            string `json:"cwd"`
+		Reason         string `json:"reason"`
 	}
 	data, _ := io.ReadAll(os.Stdin)
 	if json.Unmarshal(data, &in) != nil || in.SessionID == "" {
@@ -616,6 +617,10 @@ func cmdHook(a *Args) {
 		st["busy"] = now()
 		st["cwd"] = in.Cwd
 		st.save(in.SessionID)
+	case "end":
+		delete(st, "busy")
+		st.save(in.SessionID)
+		closeTab(in.Reason)
 	case "stop":
 		delete(st, "busy")
 		st.save(in.SessionID)
@@ -670,7 +675,7 @@ func cmdInstall(a *Args) {
 	if err := os.WriteFile(backup, data, 0o644); err != nil {
 		die("%v", err)
 	}
-	evs := fmt.Sprintf(`[{"event":"UserPromptSubmit","cmd":%q},{"event":"Stop","cmd":%q}]`, exe+" hook prompt", exe+" hook stop")
+	evs := fmt.Sprintf(`[{"event":"UserPromptSubmit","cmd":%q},{"event":"Stop","cmd":%q},{"event":"SessionEnd","cmd":%q}]`, exe+" hook prompt", exe+" hook stop", exe+" hook end")
 	cmd := exec.Command("jq", "--argjson", "evs", evs, installFilter)
 	cmd.Stdin = strings.NewReader(string(data))
 	out, err := cmd.Output()
@@ -702,4 +707,35 @@ func cmdSessions(a *Args) {
 	for _, r := range rows {
 		fmt.Printf("%s  %-16s %s  %s\n", short(r.id), r.agent, r.updated, r.where)
 	}
+}
+
+// closeTab closes the herdr tab of a Claude session that just exited, so its
+// tree pane goes with it. /clear and /resume end a session inside the same
+// Claude, so those keep the tab. CT_KEEP_TAB=1 turns this off.
+func closeTab(reason string) {
+	if reason == "clear" || reason == "resume" || os.Getenv("CT_KEEP_TAB") == "1" {
+		return
+	}
+	bin, pane := herdrBin(), os.Getenv("HERDR_PANE_ID")
+	if bin == "" || pane == "" {
+		return
+	}
+	out, err := exec.Command(bin, "pane", "get", pane).Output()
+	if err != nil {
+		return
+	}
+	var res struct {
+		Result struct {
+			Pane struct {
+				TabID string `json:"tab_id"`
+			} `json:"pane"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(out, &res) != nil || res.Result.Pane.TabID == "" {
+		return
+	}
+	// after Claude has finished exiting
+	cmd := exec.Command("sh", "-c", `sleep 1; exec "$0" tab close "$1"`, bin, res.Result.Pane.TabID)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	_ = cmd.Start()
 }

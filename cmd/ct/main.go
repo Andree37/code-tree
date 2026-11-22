@@ -153,7 +153,7 @@ func init() {
 		{"see", "", "the conversation graph of the package Claude is working in (follows the Claude in this herdr tab)", []flagSpec{{"session", "", true, "follow this session (id, prefix or intercom name)"}}, cmdSee},
 		{"sessions", "", "Claude sessions with a conversation tree", nil, cmdSessions},
 		{"install", "claude", "add ct's hooks to ~/.claude/settings.json so sessions build their trees", nil, cmdInstall},
-		{"hook", "EVENT", "Claude Code hook entry (prompt, stop)", nil, cmdHook},
+		{"hook", "EVENT", "Claude Code hook entry (prompt, stop, end)", nil, cmdHook},
 		{"turn", "", "place a session's new turns in its package trees (run by the stop hook)", []flagSpec{
 			{"session", "", true, "session id"}, {"transcript", "", true, "transcript path"}, {"cwd", "", true, "session folder"}}, cmdTurn},
 		{"run", "ID", "start a new agent on an open node in its own herdr tab", []flagSpec{{"agent", "", true, "agent command (default claude)"}, fForce, fBy}, cmdRun},
