@@ -150,6 +150,12 @@ func init() {
 		{"chat", "ID [MESSAGE]", "talk to the chat agent about a node (no message: print the chat)", []flagSpec{fBy}, cmdChat},
 		{"talk", "ID TEXT", "message the agent on a node (its owner, else the agent in this herdr tab) via intercom", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdTalk},
 		{"work", "ID", "ask the agent in this tab (or --to) to work on a node now", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdWork},
+		{"see", "", "the conversation graph of the package Claude is working in (follows the Claude in this herdr tab)", []flagSpec{{"session", "", true, "follow this session (id, prefix or intercom name)"}}, cmdSee},
+		{"sessions", "", "Claude sessions with a conversation tree", nil, cmdSessions},
+		{"install", "claude", "add ct's hooks to ~/.claude/settings.json so sessions build their trees", nil, cmdInstall},
+		{"hook", "EVENT", "Claude Code hook entry (prompt, stop)", nil, cmdHook},
+		{"turn", "", "place a session's new turns in its package trees (run by the stop hook)", []flagSpec{
+			{"session", "", true, "session id"}, {"transcript", "", true, "transcript path"}, {"cwd", "", true, "session folder"}}, cmdTurn},
 		{"run", "ID", "start a new agent on an open node in its own herdr tab", []flagSpec{{"agent", "", true, "agent command (default claude)"}, fForce, fBy}, cmdRun},
 		{"watch", "", "live view of the tree for a pane beside your agent (single-key actions)", nil, cmdWatch},
 		{"note", "ID TEXT", "append to a node's log", []flagSpec{fBy}, cmdNote},
