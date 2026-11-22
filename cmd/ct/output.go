@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -200,10 +202,56 @@ func writeGraphMD(dir string) {
 
 // ---------------------------------------------------------------- web view
 
-func renderHTML(dir string) string {
+func renderHTML(dir, token string) string {
 	g := load(dir)
 	data := strings.ReplaceAll(g.dump(), "</script", `<\/script`)
-	return strings.Replace(graphHTML, "__DATA__", data, 1)
+	return strings.Replace(strings.Replace(graphHTML, "__TOKEN__", token, 1), "__DATA__", data, 1)
+}
+
+// actionArgs maps a page action to a ct command line. Text always comes after "--".
+func actionArgs(action, id, text string) ([]string, bool) {
+	if id == "" {
+		return nil, false
+	}
+	by := []string{"--by", "human"}
+	withText := func(cmd string) []string { return append(append([]string{cmd}, by...), "--", id, text) }
+	withNote := func(cmd string) []string {
+		args := append([]string{cmd}, by...)
+		if text != "" {
+			args = append(args, "--note", text)
+		}
+		return append(args, "--", id)
+	}
+	switch action {
+	case "answer", "decide", "note", "chat":
+		if text == "" {
+			return nil, false
+		}
+		return withText(action), true
+	case "reject":
+		return withText(action), true
+	case "accept", "ack", "done", "drop", "open":
+		return withNote(action), true
+	case "add":
+		if text == "" {
+			return nil, false
+		}
+		return append(append([]string{"add"}, by...), "-b", id, "--", text), true
+	}
+	return nil, false
+}
+
+// runSelf runs this ct binary against the tree and returns its output.
+func runSelf(tree string, args []string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return err.Error(), err
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = filepath.Dir(tree)
+	cmd.Env = append(os.Environ(), "CT_TREE="+tree, "CT_AGENT=")
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 func openBrowser(url string) {
@@ -219,7 +267,7 @@ func openBrowser(url string) {
 func cmdView(a *Args) {
 	dir := requireTree()
 	out := filepath.Join(dir, "graph.html")
-	if err := os.WriteFile(out, []byte(renderHTML(dir)), 0o644); err != nil {
+	if err := os.WriteFile(out, []byte(renderHTML(dir, "")), 0o644); err != nil {
 		die("%v", err)
 	}
 	fmt.Println(out)
@@ -231,6 +279,11 @@ func cmdView(a *Args) {
 func cmdServe(a *Args) {
 	dir := requireTree()
 	port := a.Get("port", "7337")
+	tok := make([]byte, 16)
+	if _, err := rand.Read(tok); err != nil {
+		die("%v", err)
+	}
+	token := hex.EncodeToString(tok)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/graph.txt", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -240,7 +293,39 @@ func cmdServe(a *Args) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(renderHTML(dir)))
+		_, _ = w.Write([]byte(renderHTML(dir, token)))
+	})
+	// writes: only from this page (token), only fixed ct commands, never a shell
+	mux.HandleFunc("/act", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("X-CT-Token") != token {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		args, ok := actionArgs(r.FormValue("action"), r.FormValue("id"), r.FormValue("text"))
+		if !ok {
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			return
+		}
+		if r.FormValue("action") == "chat" { // agents are slow: run in the background
+			go func() { _, _ = runSelf(dir, args) }()
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		out, err := runSelf(dir, args)
+		if err != nil {
+			http.Error(w, out, http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(out))
+	})
+	mux.HandleFunc("/chat.txt", func(w http.ResponseWriter, r *http.Request) {
+		id := filepath.Base(r.URL.Query().Get("id"))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if _, err := os.Stat(pendingPath(dir, id)); err == nil {
+			w.Header().Set("X-CT-Pending", "1")
+		}
+		_, _ = w.Write([]byte(readChat(dir, id)))
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
 	if err != nil {

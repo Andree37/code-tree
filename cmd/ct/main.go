@@ -147,6 +147,7 @@ func init() {
 		}, cmdCheck},
 		{"answer", "ID TEXT", "answer a needs-you node; the answer becomes a decision for it and everything below", []flagSpec{fBy}, cmdAnswer},
 		{"decide", "ID TEXT", "record a decision that holds for a node and everything below it", []flagSpec{fBy}, cmdDecide},
+		{"chat", "ID [MESSAGE]", "talk to the chat agent about a node (no message: print the chat)", []flagSpec{fBy}, cmdChat},
 		{"note", "ID TEXT", "append to a node's log", []flagSpec{fBy}, cmdNote},
 		{"link", "CHILD PARENT", "make CHILD block PARENT", []flagSpec{fBy}, cmdLink},
 		{"unlink", "CHILD PARENT", "remove CHILD → PARENT", []flagSpec{fBy}, cmdUnlink},

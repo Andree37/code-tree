@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Code Tree</title>
+<meta name="ct-token" content="__TOKEN__">
 <style>
 :root {
   --bg: #0b0b0b; --panel: #141414; --card: #161616; --line: #2a2a2a; --text: #ececec;
@@ -78,6 +79,16 @@ nav .badge { background: var(--accent); color: #fff; border-radius: 999px; font-
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px; margin-bottom: 8px; cursor: pointer; }
 .card.hot { border-color: var(--accent); }
 .card .t { font-weight: 600; margin-bottom: 4px; }
+.acts { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.acts textarea, .chat textarea { width: 100%; min-height: 64px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px; font: inherit; resize: vertical; }
+.acts .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.acts button.primary, .chat button { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chat { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.msg { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); white-space: pre-wrap; }
+.msg.you { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.msg small { display: block; color: var(--muted); margin-bottom: 3px; }
+.err { color: var(--bad); white-space: pre-wrap; }
 @media (max-width: 640px) { header h1, .stat { display: none; } .row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -116,6 +127,63 @@ function parse(text) {
 }
 let RAW = document.getElementById("data").textContent.replaceAll("<\\/script", "</script");
 let DATA = parse(RAW);
+const TOKEN = document.querySelector('meta[name="ct-token"]').content.replace("__TOKEN__", "");
+const LIVE = location.protocol.startsWith("http") && TOKEN;
+
+async function refresh() {
+  try {
+    const t = await (await fetch("graph.txt", { cache: "no-store" })).text();
+    if (t.slice(t.indexOf("\n")) !== RAW.slice(RAW.indexOf("\n"))) { RAW = t; DATA = parse(t); render(); }
+  } catch {}
+}
+
+async function act(action, id, text = "") {
+  const r = await fetch("act", { method: "POST", headers: { "X-CT-Token": TOKEN }, body: new URLSearchParams({ action, id, text }) });
+  const out = await r.text();
+  const e = side.querySelector(".err"); if (e) e.textContent = r.ok ? "" : out;
+  if (r.ok) { const ta = side.querySelector(".acts textarea"); if (ta) ta.value = ""; }
+  await refresh();
+  return r.ok;
+}
+
+// buttons offered per state: [action, label, needs text?]
+const ACTIONS = {
+  "needs-you": [["answer", "Answer", true]],
+  proposed: [["accept", "Accept"], ["reject", "Reject"]],
+  ready: [["done", "Accept as done"], ["open", "Send back"]],
+  stale: [["ack", "Still holds"], ["open", "Reopen"]],
+};
+function actionsHTML(n) {
+  if (!LIVE) return "";
+  const own = ACTIONS[n.state] || [];
+  const common = RES.has(n.state) ? [["note", "Note", true]]
+    : [["decide", "Add decision", true], ["add", "Add sub-task", true], ["note", "Note", true], ["drop", "Drop"]];
+  const btn = ([a, l, t], k) => `<button data-act="${a}" data-text="${t ? 1 : ""}" class="${k === 0 && own.length ? "primary" : ""}">${l}</button>`;
+  return `<div class="acts"><textarea placeholder="${n.state === "needs-you" ? "Your answer (becomes a decision for this node and everything below)" : "Text for answer / decision / sub-task / note / reason"}"></textarea>
+    <div class="btns">${[...own, ...common].map(btn).join("")}</div><div class="err"></div></div>`;
+}
+
+let chatTimer = null;
+function chatHTML() {
+  if (!LIVE) return "";
+  return `<div class="chat"><b>Chat</b><div class="msgs"><small class="meta">loading…</small></div>
+    <textarea placeholder="Ask the agent about this node"></textarea><div class="btns"><button>Send</button> <small class="meta pend"></small></div></div>`;
+}
+async function loadChat(id) {
+  clearTimeout(chatTimer);
+  const box = side.querySelector(".chat"); if (!box || selected !== id) return;
+  const r = await fetch("chat.txt?id=" + encodeURIComponent(id), { cache: "no-store" });
+  const text = await r.text(), pending = r.headers.get("X-CT-Pending");
+  const msgs = [];
+  for (const block of text.split(/^@@ /m).filter(Boolean)) {
+    const nl = block.indexOf("\n"), head = block.slice(0, nl), body = block.slice(nl + 1).trim();
+    const who = head.split(" ")[0];
+    msgs.push(`<div class="msg ${who === "human" ? "you" : ""}"><small>${esc(head)}</small>${esc(body)}</div>`);
+  }
+  box.querySelector(".msgs").innerHTML = msgs.join("") || '<small class="meta">No messages yet.</small>';
+  box.querySelector(".pend").textContent = pending ? "agent is thinking…" : "";
+  if (pending) chatTimer = setTimeout(() => loadChat(id), 1500);
+}
 const W = 264, H = 106, GX = 38, GY = 80;
 const $ = (s) => document.querySelector(s);
 const wrap = $("#wrap"), stage = $("#stage"), svg = $("#edges"), side = $("#side"), sel = $("#head");
@@ -306,6 +374,8 @@ const apply = () => (stage.style.transform = `translate(${view.x}px,${view.y}px)
 
 function open(i, keep) {
   const idx = byId(), n = idx[i];
+  // keep anything typed when the panel redraws for the same node
+  const drafts = selected === i ? [...side.querySelectorAll("textarea")].map((t) => t.value) : [];
   if (!n) { side.classList.remove("open"); selected = null; return; }
   selected = i;
   if (!keep && n.heads.length && !n.heads.includes(sel.value)) {
@@ -326,9 +396,27 @@ function open(i, keep) {
     ${n.touches.length ? `<b>Touches</b><ul>${n.touches.map((p) => `<li><code>${esc(p)}</code></li>`).join("")}</ul>` : ""}
     ${n.blocks.length ? `<b>Blocks</b><ul>${n.blocks.map((b) => `<li>${link(b)}</li>`).join("")}</ul>` : ""}
     ${n.waits_on.length ? `<b>Waits on</b><ul>${n.waits_on.map((b) => `<li>${link(b)}${idx[b]?.outcome ? `<br><small>⇒ ${esc(idx[b].outcome)}</small>` : ""}</li>`).join("")}</ul>` : ""}
+    ${actionsHTML(n)}
+    ${chatHTML()}
     <pre>${esc((n.body || "").trim())}</pre>
     <p class="meta">Agents: <code>ct show ${esc(n.id)}</code></p>`;
   side.classList.add("open");
+  if (LIVE) {
+    side.querySelectorAll(".acts button").forEach((b) => (b.onclick = async () => {
+      const text = side.querySelector(".acts textarea").value.trim();
+      if (b.dataset.text && !text) { side.querySelector(".err").textContent = "Write something first."; return; }
+      b.disabled = true; await act(b.dataset.act, i, text); b.disabled = false;
+    }));
+    const send = side.querySelector(".chat button"), ta = side.querySelector(".chat textarea");
+    send.onclick = async () => {
+      const text = ta.value.trim(); if (!text) return;
+      send.disabled = true; ta.value = "";
+      await act("chat", i, text); send.disabled = false;
+      setTimeout(() => loadChat(i), 300);
+    };
+    loadChat(i);
+  }
+  side.querySelectorAll("textarea").forEach((t, k) => { if (drafts[k]) t.value = drafts[k]; });
   side.querySelector("#close").onclick = () => { selected = null; side.classList.remove("open"); render(); };
   side.querySelectorAll("a[data-id]").forEach((a) => (a.onclick = () => {
     const t = a.dataset.id, h = idx[t].heads.includes(sel.value) ? sel.value : idx[t].heads[0];
@@ -368,14 +456,8 @@ $("#list").onclick = () => { if (selected) { selected = null; side.classList.rem
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") wrap.onclick(); if (e.key === "f") fit(); });
 
 render();
-if (location.protocol.startsWith("http")) {
-  setInterval(async () => {
-    try {
-      const t = await (await fetch("graph.txt", { cache: "no-store" })).text();
-      if (t.slice(t.indexOf("\n")) !== RAW.slice(RAW.indexOf("\n"))) { RAW = t; DATA = parse(t); render(); }
-    } catch {}
-  }, 1500);
-}
+if (location.hash.length > 1) { const id = decodeURIComponent(location.hash.slice(1)); if (byId()[id]) open(id); }
+if (location.protocol.startsWith("http")) setInterval(refresh, 1500);
 </script>
 </body>
 </html>
