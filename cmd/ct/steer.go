@@ -115,6 +115,9 @@ func cmdCheck(a *Args) {
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
 	n := g.Nodes[i]
+	if a.Bool("clear") || a.Has("set") {
+		humanOnly(a, "change a check (it runs as a shell command)")
+	}
 	switch {
 	case a.Bool("clear"):
 		n.Check = ""

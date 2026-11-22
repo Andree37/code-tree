@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"os"
@@ -204,7 +205,8 @@ func writeGraphMD(dir string) {
 
 func renderHTML(dir, token string) string {
 	g := load(dir)
-	data := strings.ReplaceAll(g.dump(), "</script", `<\/script`)
+	// HTML-escaped into a hidden element: no node text can end it early or turn into markup
+	data := html.EscapeString(g.dump())
 	return strings.Replace(strings.Replace(graphHTML, "__TOKEN__", token, 1), "__DATA__", data, 1)
 }
 
@@ -251,7 +253,7 @@ func runSelf(tree string, args []string) (string, error) {
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(tree)
-	cmd.Env = append(os.Environ(), "CT_TREE="+tree, "CT_AGENT=")
+	cmd.Env = append(os.Environ(), "CT_TREE="+tree, "CT_AGENT=", "CLAUDECODE=", "IC_ID=") // the page acts as the human
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -297,8 +299,12 @@ func cmdServe(a *Args) {
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte(renderHTML(dir, token)))
 	})
-	// writes: only from this page (token), only fixed ct commands, never a shell
+	// writes: only from this page (token, same origin), only fixed ct commands, never a shell
 	mux.HandleFunc("/act", func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		if r.Method != http.MethodPost || r.Header.Get("X-CT-Token") != token {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -338,5 +344,27 @@ func cmdServe(a *Args) {
 	if !a.Bool("no-open") {
 		openBrowser(url)
 	}
-	die("%v", http.Serve(ln, mux))
+	_, port, _ = net.SplitHostPort(ln.Addr().String())
+	die("%v", http.Serve(ln, localOnly(port, mux)))
+}
+
+// localOnly refuses requests whose Host is not this server itself, so a web
+// page that rebinds its own domain to 127.0.0.1 can't read the page or its token.
+func localOnly(port string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostAllowed(r.Host, port) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hostAllowed(host, port string) bool {
+	for _, h := range []string{"127.0.0.1", "localhost", "[::1]"} {
+		if host == h+":"+port {
+			return true
+		}
+	}
+	return false
 }

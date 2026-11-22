@@ -26,6 +26,7 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''
 
 func cmdRun(a *Args) {
 	need(a, 1, "run")
+	humanOnly(a, "start a new agent (it runs a command)")
 	bin := herdrBin()
 	if bin == "" {
 		die("ct run opens a herdr tab, so it only works inside herdr")

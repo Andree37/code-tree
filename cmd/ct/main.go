@@ -219,7 +219,8 @@ func need(a *Args, n int, cmd string) {
 }
 
 func who(a *Args) string {
-	if by := a.Get("by", ""); by != "" {
+	// an agent may name itself with --by, but never claim to be the human
+	if by := a.Get("by", ""); by != "" && !(inAgent() && strings.EqualFold(by, "human")) {
 		return by
 	}
 	if env := os.Getenv("CT_AGENT"); env != "" {
@@ -232,6 +233,18 @@ func who(a *Args) string {
 		return "claude"
 	}
 	return "human"
+}
+
+// inAgent is true when ct runs on behalf of an agent rather than the human.
+func inAgent() bool {
+	return os.Getenv("CT_AGENT") != "" || os.Getenv("CLAUDECODE") == "1" || os.Getenv("IC_ID") != ""
+}
+
+// humanOnly stops agents from doing what only the human may do.
+func humanOnly(a *Args, what string) {
+	if who(a) != "human" {
+		die("only the human can %s; ask them with `ct ask`", what)
+	}
 }
 
 func appendLog(n *Node, text, by string) {
@@ -303,6 +316,9 @@ func cmdAdd(a *Args) {
 		n.Blocks = []string{}
 	}
 	recordCodeTouches(g, n, a.All("touches"))
+	if a.Has("check") {
+		humanOnly(a, "set a check (it runs as a shell command)")
+	}
 	n.Check = oneLine(a.Get("check", ""))
 	appendLog(n, "created", who(a))
 	changed := []*Node{n}

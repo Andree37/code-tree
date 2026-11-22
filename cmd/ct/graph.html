@@ -106,7 +106,7 @@ nav .badge { background: var(--accent); color: #fff; border-radius: 999px; font-
 <div id="wrap"><div id="stage"><svg id="edges"></svg></div></div>
 <div id="list"></div>
 <aside id="side"></aside>
-<script type="text/plain" id="data">__DATA__</script>
+<div id="data" hidden>__DATA__</div>
 <script>
 // graph data: plain lines written by `ct` ("@ id", then "key value"; lists are tab-separated)
 const LISTS = new Set(["blocks", "waits_on", "heads", "touches", "stale"]);
@@ -125,7 +125,7 @@ function parse(text) {
   }
   return { generated, nodes };
 }
-let RAW = document.getElementById("data").textContent.replaceAll("<\\/script", "</script");
+let RAW = document.getElementById("data").textContent; // HTML-escaped by ct, decoded here
 let DATA = parse(RAW);
 const TOKEN = document.querySelector('meta[name="ct-token"]').content.replace("__TOKEN__", "");
 const LIVE = location.protocol.startsWith("http") && TOKEN;
