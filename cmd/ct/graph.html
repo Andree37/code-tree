@@ -95,8 +95,26 @@ nav .badge { background: var(--accent); color: #fff; border-radius: 999px; font-
 <div id="wrap"><div id="stage"><svg id="edges"></svg></div></div>
 <div id="list"></div>
 <aside id="side"></aside>
+<script type="text/plain" id="data">__DATA__</script>
 <script>
-let DATA = __DATA__;
+// graph data: plain lines written by `ct` ("@ id", then "key value"; lists are tab-separated)
+const LISTS = new Set(["blocks", "waits_on", "heads", "touches", "stale"]);
+function parse(text) {
+  const nodes = []; let n = null, generated = "";
+  for (const line of text.split("\n")) {
+    const sp = line.indexOf(" "), k = sp < 0 ? line : line.slice(0, sp), v = sp < 0 ? "" : line.slice(sp + 1);
+    if (k === "generated") generated = v;
+    else if (k === "@") nodes.push((n = { id: v, body: "" }));
+    else if (!n) continue;
+    else if (k === "body") n.body += v + "\n";
+    else if (LISTS.has(k)) n[k] = v ? v.split("\t") : [];
+    else if (k === "unblocks") n[k] = +v;
+    else n[k] = v;
+  }
+  return { generated, nodes };
+}
+let RAW = document.getElementById("data").textContent.replaceAll("<\\/script", "</script");
+let DATA = parse(RAW);
 const W = 264, H = 106, GX = 38, GY = 80;
 const $ = (s) => document.querySelector(s);
 const wrap = $("#wrap"), stage = $("#stage"), svg = $("#edges"), side = $("#side"), sel = $("#head");
@@ -341,8 +359,8 @@ render();
 if (location.protocol.startsWith("http")) {
   setInterval(async () => {
     try {
-      const d = await (await fetch("graph.json", { cache: "no-store" })).json();
-      if (JSON.stringify(d.nodes) !== JSON.stringify(DATA.nodes)) { DATA = d; render(); }
+      const t = await (await fetch("graph.txt", { cache: "no-store" })).text();
+      if (t.slice(t.indexOf("\n")) !== RAW.slice(RAW.indexOf("\n"))) { RAW = t; DATA = parse(t); render(); }
     } catch {}
   }, 1500);
 }

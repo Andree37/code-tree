@@ -13,7 +13,7 @@ touching code, and keep the graph honest while you work.
 
 ## Reading the graph
 - Overview: `.tree/GRAPH.md` (regenerated automatically, never edit it).
-- Machine-readable: `ct graph --json`; one node with its full context: `ct show <id> --json`.
+- Everything is plain text: `ct ls` for the tree, `ct show <id>` for one node with its full context.
 - `ct show <id>` prints the chain up to the HEAD (why this matters) and the
   outcomes of resolved children (what was already decided below you). Read it
   before you start.

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -128,10 +126,7 @@ func parseNode(text, path string) *Node {
 		}
 		k, v, _ := strings.Cut(line, ":")
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		str := v
-		if strings.HasPrefix(v, `"`) {
-			_ = json.Unmarshal([]byte(v), &str)
-		}
+		str := unquote(v)
 		switch k {
 		case "id":
 			n.ID = str
@@ -154,11 +149,7 @@ func parseNode(text, path string) *Node {
 		case "base":
 			n.Base = str
 		case "blocks", "touches", "stale":
-			var list []string
-			if strings.HasPrefix(v, "[") && json.Unmarshal([]byte(v), &list) == nil {
-			} else if str != "" {
-				list = []string{str}
-			}
+			list := splitList(v)
 			switch k {
 			case "blocks":
 				n.Blocks = list
@@ -183,18 +174,30 @@ func parseNode(text, path string) *Node {
 	return n
 }
 
-func jsonStr(v any) string {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
-	return strings.TrimRight(b.String(), "\n")
+// unquote strips quotes left by older tree files (title: "x").
+func unquote(v string) string {
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		return strings.ReplaceAll(v[1:len(v)-1], `\"`, `"`)
+	}
+	return v
+}
+
+// splitList reads "a, b" (and the older ["a", "b"]).
+func splitList(v string) []string {
+	v = strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")
+	out := []string{}
+	for _, p := range strings.Split(v, ",") {
+		if p = unquote(strings.TrimSpace(p)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func dumpNode(n *Node) string {
 	vals := map[string]string{
-		"id": n.ID, "title": jsonStr(n.Title), "mode": n.Mode, "agent": n.Agent, "status": n.Status,
-		"blocks": jsonStr(n.Blocks), "outcome": jsonStr(n.Outcome), "created": n.Created, "updated": n.Updated,
+		"id": n.ID, "title": n.Title, "mode": n.Mode, "agent": n.Agent, "status": n.Status,
+		"blocks": strings.Join(n.Blocks, ", "), "outcome": n.Outcome, "created": n.Created, "updated": n.Updated,
 	}
 	var b strings.Builder
 	b.WriteString("---\n")
@@ -203,10 +206,10 @@ func dumpNode(n *Node) string {
 	}
 	// code-sync fields only appear once used, so plain trees stay plain
 	if len(n.Touches) > 0 {
-		fmt.Fprintf(&b, "touches: %s\n", jsonStr(n.Touches))
+		fmt.Fprintf(&b, "touches: %s\n", strings.Join(n.Touches, ", "))
 	}
 	if len(n.Stale) > 0 {
-		fmt.Fprintf(&b, "stale: %s\n", jsonStr(n.Stale))
+		fmt.Fprintf(&b, "stale: %s\n", strings.Join(n.Stale, ", "))
 	}
 	if n.Base != "" {
 		fmt.Fprintf(&b, "base: %s\n", n.Base)
@@ -459,72 +462,30 @@ func (g *Graph) actionable(who string) []string {
 	return ids
 }
 
-// ---------------------------------------------------------------- JSON views
+// ---------------------------------------------------------------- text dump
 
-type NodeJSON struct {
-	ID       string     `json:"id"`
-	Title    string     `json:"title"`
-	Kind     string     `json:"kind"`
-	Status   string     `json:"status"`
-	State    string     `json:"state"`
-	Label    string     `json:"label"`
-	Mode     string     `json:"mode"`
-	Agent    string     `json:"agent"`
-	Outcome  string     `json:"outcome"`
-	Blocks   []string   `json:"blocks"`
-	WaitsOn  []string   `json:"waits_on"`
-	Unblocks int        `json:"unblocks"`
-	Heads    []string   `json:"heads"`
-	Touches  []string   `json:"touches"`
-	Stale    []string   `json:"stale"`
-	At       string     `json:"at"`
-	Created  string     `json:"created"`
-	Updated  string     `json:"updated"`
-	Body     *string    `json:"body,omitempty"`
-	Chain    []NodeJSON `json:"chain,omitempty"`
-	Children []NodeJSON `json:"children,omitempty"`
-}
-
-func (g *Graph) nodeJSON(i string, full bool) NodeJSON {
-	n, f := g.Nodes[i], g.Info[i]
-	d := NodeJSON{
-		ID: i, Title: n.Title, Kind: f.Kind, Status: n.Status, State: f.State, Label: f.Label,
-		Mode: n.Mode, Agent: n.Agent, Outcome: n.Outcome, Blocks: f.Parents, WaitsOn: f.Children,
-		Unblocks: f.Unblocks, Heads: g.headsOf(i), Created: n.Created, Updated: n.Updated,
-		Touches: nonNil(n.Touches), Stale: nonNil(n.Stale), At: n.At,
-	}
-	if full {
-		body := n.Body
-		d.Body = &body
-	}
-	return d
-}
-
-type GraphJSON struct {
-	Generated string     `json:"generated"`
-	Nodes     []NodeJSON `json:"nodes"`
-}
-
-func (g *Graph) graphJSON(full bool) GraphJSON {
-	out := GraphJSON{Generated: now(), Nodes: []NodeJSON{}}
+// dump writes the whole graph as plain lines for the web page:
+// "@ id" starts a node, then "key value" lines; lists are tab-separated;
+// every body line is its own "body ..." line.
+func (g *Graph) dump() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "generated %s\n", now())
 	for _, i := range g.IDs {
-		out.Nodes = append(out.Nodes, g.nodeJSON(i, full))
+		n, f := g.Nodes[i], g.Info[i]
+		fmt.Fprintf(&b, "@ %s\n", i)
+		for _, kv := range [][2]string{
+			{"title", n.Title}, {"kind", f.Kind}, {"status", n.Status}, {"state", f.State}, {"label", f.Label},
+			{"mode", n.Mode}, {"agent", n.Agent}, {"outcome", n.Outcome}, {"at", n.At},
+			{"created", n.Created}, {"updated", n.Updated}, {"unblocks", fmt.Sprint(f.Unblocks)},
+			{"blocks", strings.Join(f.Parents, "\t")}, {"waits_on", strings.Join(f.Children, "\t")},
+			{"heads", strings.Join(g.headsOf(i), "\t")}, {"touches", strings.Join(n.Touches, "\t")},
+			{"stale", strings.Join(n.Stale, "\t")},
+		} {
+			fmt.Fprintf(&b, "%s %s\n", kv[0], kv[1])
+		}
+		for _, line := range strings.Split(strings.TrimRight(n.Body, "\n"), "\n") {
+			fmt.Fprintf(&b, "body %s\n", line)
+		}
 	}
-	return out
-}
-
-func nonNil(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
-}
-
-func printJSON(v any) {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
-	os.Stdout.Write(b.Bytes())
+	return b.String()
 }

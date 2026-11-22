@@ -9,7 +9,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -195,26 +194,43 @@ func matchAny(pats []string, p string) bool {
 
 // ---------------------------------------------------------------- sync state
 
+// SyncState lives in .tree/sync as plain lines:
+//
+//	head <sha>
+//	synced <time>
+//	unmapped <path>   (one line per path)
 type SyncState struct {
-	Head     string   `json:"head"`
-	Synced   string   `json:"synced"`
-	Unmapped []string `json:"unmapped"`
+	Head, Synced string
+	Unmapped     []string
 }
 
 func readSync(tree string) SyncState {
-	var s SyncState
-	if data, err := os.ReadFile(filepath.Join(tree, "sync.json")); err == nil {
-		_ = json.Unmarshal(data, &s)
+	s := SyncState{Unmapped: []string{}}
+	data, err := os.ReadFile(filepath.Join(tree, "sync"))
+	if err != nil {
+		return s
 	}
-	if s.Unmapped == nil {
-		s.Unmapped = []string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		k, v, _ := strings.Cut(line, " ")
+		switch k {
+		case "head":
+			s.Head = v
+		case "synced":
+			s.Synced = v
+		case "unmapped":
+			s.Unmapped = append(s.Unmapped, v)
+		}
 	}
 	return s
 }
 
 func writeSync(tree string, s SyncState) {
-	data, _ := json.MarshalIndent(s, "", "  ")
-	if err := os.WriteFile(filepath.Join(tree, "sync.json"), append(data, '\n'), 0o644); err != nil {
+	var b strings.Builder
+	fmt.Fprintf(&b, "head %s\nsynced %s\n", s.Head, s.Synced)
+	for _, p := range s.Unmapped {
+		fmt.Fprintf(&b, "unmapped %s\n", p)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "sync"), []byte(b.String()), 0o644); err != nil {
 		die("%v", err)
 	}
 }
@@ -336,7 +352,7 @@ func cmdSync(a *Args) {
 		}
 		for k, p := range st.Unmapped {
 			if k == 20 {
-				fmt.Printf("  … %d more unmapped (see .tree/sync.json)\n", len(st.Unmapped)-20)
+				fmt.Printf("  … %d more unmapped (see .tree/sync)\n", len(st.Unmapped)-20)
 				break
 			}
 			fmt.Printf("  unmapped %s\n", p)

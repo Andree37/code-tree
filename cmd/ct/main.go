@@ -8,7 +8,7 @@
 //
 //	.tree/GRAPH.md      regenerated on every change (mermaid + tables)
 //	.tree/PROTOCOL.md   how agents should work with the tree
-//	ct ... --json       machine-readable output for every read command
+//	ct show / next / ls plain text that agents read directly
 package main
 
 import (
@@ -101,7 +101,6 @@ type command struct {
 
 var (
 	fBy      = flagSpec{"by", "", true, "who is acting (default: $CT_AGENT or 'human')"}
-	fJSON    = flagSpec{"json", "", false, "machine-readable output"}
 	fForce   = flagSpec{"force", "", false, "skip safety checks"}
 	fOutcome = flagSpec{"outcome", "o", true, "one-line result other nodes will see"}
 	fNote    = flagSpec{"note", "", true, "log message"}
@@ -123,13 +122,12 @@ func init() {
 			fTouches,
 			fBy,
 		}, cmdAdd},
-		{"ls", "[HEAD]", "print the tree(s)", []flagSpec{{"all", "", false, "include resolved nodes and heads"}, fJSON}, cmdLs},
-		{"show", "ID", "one node with its chain to the head and children's outcomes", []flagSpec{fJSON}, cmdShow},
+		{"ls", "[HEAD]", "print the tree(s)", []flagSpec{{"all", "", false, "include resolved nodes and heads"}}, cmdLs},
+		{"show", "ID", "one node with its chain to the head and children's outcomes", nil, cmdShow},
 		{"next", "", "actionable nodes, highest leverage first", []flagSpec{
 			{"for", "", true, "agent | human | all (default all)"},
 			{"head", "", true, "only under this head"},
 			{"n", "n", true, "limit"},
-			fJSON,
 		}, cmdNext},
 		{"claim", "ID", "mark a node working", []flagSpec{fBy, fForce}, cmdClaim},
 		{"ask", "ID QUESTION", "mark a node needs-you with a question for the human", []flagSpec{fBy}, cmdAsk},
@@ -143,10 +141,8 @@ func init() {
 		{"unlink", "CHILD PARENT", "remove CHILD → PARENT", []flagSpec{fBy}, cmdUnlink},
 		{"rm", "ID", "delete a node file", []flagSpec{fForce}, cmdRm},
 		{"edit", "ID", "open a node in $EDITOR", nil, cmdEdit},
-		{"graph", "", "dump the graph (md | json | mermaid)", []flagSpec{
-			{"format", "f", true, "md | json | mermaid (default md)"},
-			fJSON,
-			{"full", "", false, "json: include node bodies"},
+		{"graph", "", "dump the graph (md | mermaid)", []flagSpec{
+			{"format", "f", true, "md | mermaid (default md)"},
 		}, cmdGraph},
 		{"view", "", "write .tree/graph.html and open it", []flagSpec{fNoOpen}, cmdView},
 		{"serve", "", "live graph view in the browser", []flagSpec{{"port", "p", true, "port (default 7337)"}, fNoOpen}, cmdServe},
@@ -156,6 +152,7 @@ func init() {
 			{"dry-run", "", false, "report without writing"},
 		}, cmdSync},
 		{"ack", "ID", "mark a stale node as still valid after code changes", []flagSpec{fNote, fOutcome, fBy}, cmdAck},
+		{"fmt", "", "rewrite every node file in the current format", nil, cmdFmt},
 		{"prompt", "", "print the agent protocol", nil, func(*Args) { fmt.Print(protocol) }},
 	}
 }
@@ -421,10 +418,6 @@ func cmdEdit(a *Args) {
 
 func cmdLs(a *Args) {
 	g := load(requireTree())
-	if a.Bool("json") {
-		printJSON(g.graphJSON(false))
-		return
-	}
 	var heads []string
 	switch {
 	case len(a.Pos) > 0:
@@ -453,19 +446,6 @@ func cmdShow(a *Args) {
 	var chain []string // follow first parent up to a head for the "why" chain
 	for cur := f.Parents; len(cur) > 0; cur = g.Info[cur[0]].Parents {
 		chain = append(chain, cur[0])
-	}
-
-	if a.Bool("json") {
-		d := g.nodeJSON(i, true)
-		d.Chain, d.Children = []NodeJSON{}, []NodeJSON{}
-		for _, p := range chain {
-			d.Chain = append(d.Chain, g.nodeJSON(p, false))
-		}
-		for _, c := range f.Children {
-			d.Children = append(d.Children, g.nodeJSON(c, false))
-		}
-		printJSON(d)
-		return
 	}
 
 	fmt.Println(n.Title)
@@ -529,14 +509,6 @@ func cmdNext(a *Args) {
 			ids = ids[:k]
 		}
 	}
-	if a.Bool("json") {
-		out := []NodeJSON{}
-		for _, i := range ids {
-			out = append(out, g.nodeJSON(i, false))
-		}
-		printJSON(out)
-		return
-	}
 	if len(ids) == 0 {
 		fmt.Println("nothing actionable.")
 	}
@@ -548,12 +520,7 @@ func cmdNext(a *Args) {
 func cmdGraph(a *Args) {
 	dir := requireTree()
 	format := a.Get("format", "md")
-	if a.Bool("json") {
-		format = "json"
-	}
 	switch format {
-	case "json":
-		printJSON(load(dir).graphJSON(a.Bool("full")))
 	case "mermaid":
 		g := load(dir)
 		fmt.Println(g.mermaid(g.IDs))
@@ -562,7 +529,7 @@ func cmdGraph(a *Args) {
 		data, _ := os.ReadFile(filepath.Join(dir, "GRAPH.md"))
 		os.Stdout.Write(data)
 	default:
-		die("--format must be md, json or mermaid")
+		die("--format must be md or mermaid")
 	}
 }
 
@@ -579,4 +546,16 @@ func main() {
 		}
 	}
 	die("unknown command '%s' (see `ct --help`)", name)
+}
+
+func cmdFmt(*Args) {
+	g := load(requireTree())
+	for _, i := range g.IDs {
+		p := filepath.Join(g.Dir, "nodes", i+".md")
+		if err := os.WriteFile(p, []byte(dumpNode(g.Nodes[i])), 0o644); err != nil {
+			die("%v", err)
+		}
+	}
+	writeGraphMD(g.Dir)
+	fmt.Printf("rewrote %d node(s)\n", len(g.IDs))
 }

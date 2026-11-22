@@ -2,7 +2,6 @@ package main
 
 import (
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -165,7 +164,7 @@ func writeGraphMD(dir string) {
 			w("**Unmapped changes** (no node touches these; `ct touch <id> <path>` to own them):\n")
 			for k, p := range st.Unmapped {
 				if k == 30 {
-					w("- … %d more in `.tree/sync.json`", len(st.Unmapped)-30)
+					w("- … %d more in `.tree/sync`", len(st.Unmapped)-30)
 					break
 				}
 				w("- `%s`", p)
@@ -194,8 +193,7 @@ func writeGraphMD(dir string) {
 
 func renderHTML(dir string) string {
 	g := load(dir)
-	data := jsonStr(g.graphJSON(true))
-	data = strings.ReplaceAll(data, "</", `<\/`)
+	data := strings.ReplaceAll(g.dump(), "</script", `<\/script`)
 	return strings.Replace(graphHTML, "__DATA__", data, 1)
 }
 
@@ -225,10 +223,10 @@ func cmdServe(a *Args) {
 	dir := requireTree()
 	port := a.Get("port", "7337")
 	mux := http.NewServeMux()
-	mux.HandleFunc("/graph.json", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+	mux.HandleFunc("/graph.txt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(load(dir).graphJSON(true))
+		_, _ = w.Write([]byte(load(dir).dump()))
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
