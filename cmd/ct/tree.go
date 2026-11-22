@@ -129,12 +129,12 @@ func parseNode(text, path string) (*Node, error) {
 		}
 		k, v, _ := strings.Cut(line, ":")
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		str := unquote(v)
+		str := v // checks and decisions keep their quotes
 		switch k {
 		case "id":
 			n.ID = str
 		case "title":
-			n.Title = str
+			n.Title = unquote(v) // older files wrote titles and outcomes as quoted strings
 		case "mode":
 			n.Mode = str
 		case "agent":
@@ -142,7 +142,7 @@ func parseNode(text, path string) (*Node, error) {
 		case "status":
 			n.Status = str
 		case "outcome":
-			n.Outcome = str
+			n.Outcome = unquote(v)
 		case "created":
 			n.Created = str
 		case "updated":
@@ -191,10 +191,16 @@ func unquote(v string) string {
 
 // splitList reads "a, b" (and the older ["a", "b"]).
 func splitList(v string) []string {
-	v = strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")
+	legacy := strings.HasPrefix(v, "[\"") && strings.HasSuffix(v, "]") // the older ["a", "b"]; a glob like [ab]/x is not
+	if legacy {
+		v = v[1 : len(v)-1]
+	}
 	out := []string{}
 	for _, p := range strings.Split(v, ",") {
-		if p = unquote(strings.TrimSpace(p)); p != "" {
+		if p = strings.TrimSpace(p); legacy {
+			p = unquote(p)
+		}
+		if p != "" {
 			out = append(out, p)
 		}
 	}

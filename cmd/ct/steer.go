@@ -25,7 +25,15 @@ func cmdAccept(a *Args) {
 		msg += ": " + note
 	}
 	appendLog(n, msg, who(a))
-	g.mutate(n)
+	changed := []*Node{n}
+	for _, p := range g.Info[i].Parents { // now it is real work: what it blocks is open again
+		if pn := g.Nodes[p]; pn.Status == "done" || pn.Status == "ready" {
+			pn.Status = "open"
+			appendLog(pn, fmt.Sprintf("reopened: accepted prerequisite `%s`", i), who(a))
+			changed = append(changed, pn)
+		}
+	}
+	g.mutate(changed...)
 	fmt.Printf("%s: Open\n", i)
 	tell(g, n, who(a), "accepted it; it can be claimed now", false)
 }

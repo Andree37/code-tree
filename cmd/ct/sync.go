@@ -117,7 +117,8 @@ type change struct {
 }
 
 func diffNames(cfg Config, from, to string) ([]change, error) {
-	out, err := git(cfg.Code, "diff", "--name-status", "-M", "--no-color", from, to)
+	// --relative: paths relative to the code folder, even when it is a subfolder of the git repo
+	out, err := git(cfg.Code, "diff", "--name-status", "-M", "--no-color", "--relative", from, to)
 	if err != nil || out == "" {
 		return nil, err
 	}
@@ -146,14 +147,18 @@ func changedSince(cfg Config, rev string) []string {
 			}
 		}
 	}
-	if out, err := git(cfg.Code, "status", "--porcelain", "--untracked-files=all"); err == nil && out != "" {
+	// status paths are relative to the repo root: keep those inside the code folder, relative to it
+	prefix, _ := git(cfg.Code, "rev-parse", "--show-prefix")
+	if out, err := git(cfg.Code, "status", "--porcelain", "--untracked-files=all", "--", "."); err == nil && out != "" {
 		for _, line := range strings.Split(out, "\n") {
 			if len(line) > 3 {
 				p := line[3:]
 				if _, after, ok := strings.Cut(p, " -> "); ok {
 					p = after
 				}
-				set[strings.Trim(p, `"`)] = true
+				if p = strings.Trim(p, `"`); strings.HasPrefix(p, prefix) {
+					set[strings.TrimPrefix(p, prefix)] = true
+				}
 			}
 		}
 	}
@@ -198,8 +203,8 @@ func match(pat, p string) bool {
 			return ok
 		}
 		return false
-	default:
-		return pat == p
+	default: // a bare name (go.sum, package-lock.json) matches at any depth
+		return pat == p || (!strings.Contains(pat, "/") && path.Base(p) == pat)
 	}
 }
 
@@ -264,6 +269,13 @@ func recordCode(g *Graph, n *Node, touches []string) {
 	if resolved(n.Status) {
 		n.At = head
 		n.Stale = nil
+		delete(n.Extra, "uncommitted")
+		for _, p := range changedSince(cfg, "") { // uncommitted edits to its files: the next commit is its own
+			if matchAny(n.Touches, p) {
+				n.Extra["uncommitted"] = "1"
+				break
+			}
+		}
 	}
 }
 
@@ -398,6 +410,14 @@ func cmdSync(a *Args) {
 		report(0)
 		return
 	}
+	if st.Head != "" && !commitExists(cfg, st.Head) && check {
+		shallow, _ := git(cfg.Code, "rev-parse", "--is-shallow-repository")
+		hint := ""
+		if strings.TrimSpace(shallow) == "true" {
+			hint = " This clone is shallow: fetch full history (e.g. actions/checkout with fetch-depth: 0)."
+		}
+		die("last synced commit %s is not in this clone, so changes since it cannot be checked.%s", short(st.Head), hint)
+	}
 	if st.Head == "" || !commitExists(cfg, st.Head) {
 		if st.Head != "" {
 			fmt.Printf("last synced commit %s is gone (rebased?); taking %s as the new baseline\n", short(st.Head), short(head))
@@ -485,7 +505,9 @@ func cmdSync(a *Args) {
 			delete(unmapped, c.Old)
 		}
 		if len(ids) == 0 {
-			if c.Status != "D" && !matchAny(cfg.Ignore, c.Path) {
+			if c.Status == "D" {
+				delete(unmapped, c.Path) // a deleted file needs no owner any more
+			} else if !matchAny(cfg.Ignore, c.Path) {
 				unmapped[c.Path] = true
 			}
 			continue
@@ -494,6 +516,13 @@ func cmdSync(a *Args) {
 		for _, i := range ids {
 			n := g.Nodes[i]
 			if !resolved(n.Status) || !changedAfter(n, c.Path) && !(c.Old != "" && changedAfter(n, c.Old)) {
+				continue
+			}
+			if n.Extra["uncommitted"] == "1" { // resolved before its work was committed: this commit is its own
+				delete(n.Extra, "uncommitted")
+				n.At = head
+				touched[i] = n
+				logs[i] = append(logs[i], "its own work was committed")
 				continue
 			}
 			what := c.Path

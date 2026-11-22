@@ -111,8 +111,13 @@ func packageOf(root string, files []string, fallback string) string {
 		return fallback
 	}
 	best := last
-	for d, c := range count {
-		if c > count[best] {
+	dirs := make([]string, 0, len(count))
+	for d := range count {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs) // ties always break the same way
+	for _, d := range dirs {
+		if count[d] > count[best] {
 			best = d
 		}
 	}
@@ -1055,12 +1060,15 @@ func recentPrompts(pkgDir string, n int) string {
 		}
 	}
 	entries, _ := os.ReadDir(filepath.Join(convoHome(), "sessions"))
-	var prompts []string
+	var sts []convoState
 	for _, e := range entries {
-		st := readConvo(e.Name())
-		if st["repo"] != root || st["transcript"] == "" {
-			continue
+		if st := readConvo(e.Name()); st["repo"] == root && st["transcript"] != "" {
+			sts = append(sts, st)
 		}
+	}
+	sort.Slice(sts, func(i, j int) bool { return sts[i]["updated"] < sts[j]["updated"] }) // oldest session first, so the newest messages are last
+	var prompts []string
+	for _, st := range sts {
 		for _, t := range readTurns(st["transcript"]) {
 			prompts = append(prompts, "- "+clip(oneLine(t.prompt), 220, false))
 		}

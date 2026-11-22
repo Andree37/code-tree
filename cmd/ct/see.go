@@ -769,7 +769,7 @@ func (s *seer) details() {
 	n, f := s.g.Nodes[s.sel], s.g.Info[s.sel]
 	lines := []string{
 		cBold + n.Title + cReset,
-		f.Label + " · " + strings.ToLower(f.Kind) + " in " + pkgName(s.root, s.pkg),
+		plainLabel(f) + " · " + strings.ToLower(f.Kind) + " in " + pkgName(s.root, s.pkg),
 		"",
 	}
 	if n.Outcome != "" {

@@ -43,8 +43,11 @@ func (a *Args) Get(name, def string) string {
 	return def
 }
 func (a *Args) All(name string) []string { return a.flags[name] }
-func (a *Args) Bool(name string) bool    { return len(a.flags[name]) > 0 }
-func (a *Args) Has(name string) bool     { return len(a.flags[name]) > 0 }
+func (a *Args) Bool(name string) bool {
+	v := strings.ToLower(a.Get(name, ""))
+	return v == "true" || v == "1" || v == "yes"
+}
+func (a *Args) Has(name string) bool { return len(a.flags[name]) > 0 }
 
 func parseArgs(cmd string, argv []string, specs []flagSpec) *Args {
 	a := &Args{flags: map[string][]string{}}
@@ -76,7 +79,10 @@ func parseArgs(cmd string, argv []string, specs []flagSpec) *Args {
 			die("%s: unknown flag %s (try `ct %s --help`)", cmd, name, cmd)
 		}
 		if !s.value {
-			a.flags[s.name] = append(a.flags[s.name], "true")
+			if !hasVal {
+				val = "true"
+			}
+			a.flags[s.name] = append(a.flags[s.name], val) // --force=false means false
 			continue
 		}
 		if !hasVal {
@@ -263,10 +269,13 @@ func cmdInit(a *Args) {
 	if err := os.MkdirAll(filepath.Join(root, "nodes"), 0o755); err != nil {
 		die("%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "config")); err != nil || a.Has("code") {
+	if old, err := os.ReadFile(filepath.Join(root, "config")); err != nil || a.Has("code") {
 		cfg := defaultConfig
+		if err == nil {
+			cfg = string(old) // keep the existing config; only the code line changes
+		}
 		if c := a.Get("code", ""); c != "" {
-			cfg = strings.Replace(cfg, "code = .", "code = "+c, 1)
+			cfg = setConfigLine(cfg, "code", c)
 		}
 		if err := os.WriteFile(filepath.Join(root, "config"), []byte(cfg), 0o644); err != nil {
 			die("%v", err)
@@ -322,7 +331,10 @@ func cmdAdd(a *Args) {
 	n.Check = oneLine(a.Get("check", ""))
 	appendLog(n, "created", who(a))
 	changed := []*Node{n}
-	for _, p := range parents { // a new child reopens a resolved/ready parent
+	for _, p := range parents { // a new child reopens a resolved/ready parent (a proposal only once accepted)
+		if status == "proposed" {
+			break
+		}
 		if pn := g.Nodes[p]; pn.Status == "done" || pn.Status == "ready" {
 			pn.Status = "open"
 			appendLog(pn, fmt.Sprintf("reopened: new prerequisite `%s`", id), who(a))
@@ -338,8 +350,16 @@ func setStatus(a *Args, status, notePrefix string) {
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
 	n, f := g.Nodes[i], g.Info[i]
-	if (status == "done" || status == "ready") && f.State == "waiting" && !a.Bool("force") {
-		die("%s is %s; resolve its children first (or --force)", i, f.Label)
+	if (status == "done" || status == "ready") && !a.Bool("force") {
+		open := 0 // count children directly: a proposed or waiting-for-you label hides them
+		for _, c := range f.Children {
+			if !resolved(g.Nodes[c].Status) {
+				open++
+			}
+		}
+		if open > 0 {
+			die("%s has %d unresolved point(s) under it; resolve them first (or --force)", i, open)
+		}
 	}
 	checkNote := ""
 	if status == "done" || status == "ready" {
@@ -369,8 +389,13 @@ func setStatus(a *Args, status, notePrefix string) {
 	old := n.Status
 	n.Status = status
 	if status == "working" {
+		if old != "working" || n.Base == "" { // re-claiming keeps the original starting point
+			n.Base = codeHead(loadConfig(g.Dir)) // "auto" touches diff from here
+		}
 		n.Agent = who(a)
-		n.Base = codeHead(loadConfig(g.Dir)) // "auto" touches diff from here
+	}
+	if !resolved(status) {
+		n.Stale = nil // reopened work is current again
 	}
 	recordCode(g, n, a.All("touches"))
 	if o := a.Get("outcome", ""); o != "" {
@@ -413,7 +438,7 @@ func cmdClaim(a *Args) {
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
 	f, n := g.Info[i], g.Nodes[i]
-	by := a.Get("by", "")
+	by := who(a) // an agent re-claiming its own node is fine
 	if f.State == "working" && n.Agent != "" && n.Agent != by && !a.Bool("force") {
 		die("%s is already claimed by %s (use --force to take it)", i, n.Agent)
 	}
@@ -665,4 +690,16 @@ func cmdFmt(*Args) {
 	}
 	writeGraphMD(g.Dir)
 	fmt.Printf("rewrote %d node(s)\n", len(g.IDs))
+}
+
+// setConfigLine replaces "key = ..." in a config file, or adds it.
+func setConfigLine(cfg, key, value string) string {
+	lines := strings.Split(cfg, "\n")
+	for i, l := range lines {
+		if k, _, ok := strings.Cut(l, "="); ok && strings.TrimSpace(k) == key && !strings.HasPrefix(strings.TrimSpace(l), "#") {
+			lines[i] = key + " = " + value
+			return strings.Join(lines, "\n")
+		}
+	}
+	return strings.TrimRight(cfg, "\n") + "\n" + key + " = " + value + "\n"
 }
