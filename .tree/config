@@ -1,0 +1,6 @@
+# code-tree config
+# code: the repo this tree describes, relative to the folder holding .tree/.
+#       It is only read (git rev-parse / diff), never written to.
+code = .
+# ignore: comma-separated patterns that never count as unmapped changes.
+ignore = go.sum, *.lock, package-lock.json
