@@ -99,6 +99,9 @@ func packageOf(root string, files []string, fallback string) string {
 		if strings.HasPrefix(dir, ".") && dir != "." { // .git, .tree, .claude ...
 			continue
 		}
+		if !codeExt[strings.ToLower(filepath.Ext(f))] { // docs and config don't make a package
+			continue
+		}
 		count[dir]++
 		last = dir
 	}
@@ -763,4 +766,12 @@ func closeTab(session, reason string) {
 	cmd := exec.Command("sh", "-c", `sleep 1; exec "$0" tab close "$1"`, bin, res.Result.Pane.TabID)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	_ = cmd.Start()
+}
+
+// codeExt are the files that say which package a turn worked in.
+var codeExt = map[string]bool{
+	".go": true, ".zig": true, ".rs": true, ".c": true, ".h": true, ".cc": true, ".cpp": true, ".hpp": true,
+	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".py": true, ".rb": true, ".java": true,
+	".kt": true, ".swift": true, ".ml": true, ".mli": true, ".hs": true, ".ex": true, ".exs": true, ".lua": true,
+	".odin": true, ".cs": true, ".scala": true, ".php": true, ".sh": true, ".gd": true, ".sql": true,
 }
