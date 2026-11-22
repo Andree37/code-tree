@@ -1,0 +1,37 @@
+# code-tree protocol
+
+This project tracks its work as a dependency graph in `.tree/`. Read this before
+touching code, and keep the graph honest while you work.
+
+## Model
+- Each node is `.tree/nodes/<id>.md`: frontmatter + `## Context` + `## Log`.
+- A node *blocks* its parents. A parent is **Waiting k/n** until all n children
+  are done or dropped. Nodes with no parent are **HEAD**s (top-level goals).
+- Stored status: `open` · `working` · `needs-you` · `ready` · `done` · `dropped`.
+- `unblocks N` = how many unresolved nodes above this one it is holding up.
+  Higher means more leverage.
+
+## Reading the graph
+- Overview: `.tree/GRAPH.md` (regenerated automatically, never edit it).
+- Machine-readable: `ct graph --json`; one node with its full context: `ct show <id> --json`.
+- `ct show <id>` prints the chain up to the HEAD (why this matters) and the
+  outcomes of resolved children (what was already decided below you). Read it
+  before you start.
+
+## Working loop
+1. `ct next --for agent` lists unblocked, unclaimed work by leverage.
+2. `ct claim <id> --by <your-name>` marks it working so nobody else takes it.
+3. Found a prerequisite that must be settled first?
+   `ct add "<title>" --blocks <id> -d "<context>"`. The parent becomes Waiting.
+   Keep nodes small: one question or one change each.
+4. Need a human decision? `ct ask <id> "<question with options and your recommendation>"`.
+   The node becomes **Needs you**. Stop working on it and pick other work.
+5. Log progress: `ct note <id> "<what you did / learned>"`.
+6. Finished: `ct ready <id> --outcome "<one-line result>"` so a human reviews it,
+   or `ct done <id> --outcome "..."` when the user said no review is needed.
+   The outcome is what parents and other agents will see, so make it self-contained.
+
+## Rules
+- Never mark something done that you did not verify.
+- Do not resolve another agent's `working` node.
+- Prefer adding a child over growing a node's scope.
