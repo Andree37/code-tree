@@ -620,7 +620,7 @@ func cmdHook(a *Args) {
 	case "end":
 		delete(st, "busy")
 		st.save(in.SessionID)
-		closeTab(in.Reason)
+		closeTab(in.SessionID, in.Reason)
 	case "stop":
 		delete(st, "busy")
 		st.save(in.SessionID)
@@ -712,28 +712,53 @@ func cmdSessions(a *Args) {
 // closeTab closes the herdr tab of a Claude session that just exited, so its
 // tree pane goes with it. /clear and /resume end a session inside the same
 // Claude, so those keep the tab. CT_KEEP_TAB=1 turns this off.
-func closeTab(reason string) {
+//
+// It only ever closes a tab whose pane herdr reports as running this very
+// session, so a stray "session ended" from any other process (a helper, a
+// child that inherited the pane's environment) can never close a tab.
+// Every decision is logged to tabclose.log.
+func closeTab(session, reason string) {
+	logf := func(format string, a ...any) {
+		f, err := os.OpenFile(filepath.Join(convoHome(), "tabclose.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			fmt.Fprintf(f, "%s session=%s reason=%s pane=%s ppid=%d: %s\n", now(), short(session), reason,
+				os.Getenv("HERDR_PANE_ID"), os.Getppid(), fmt.Sprintf(format, a...))
+			f.Close()
+		}
+	}
 	if reason == "clear" || reason == "resume" || os.Getenv("CT_KEEP_TAB") == "1" {
+		logf("kept: %s", reason)
 		return
 	}
 	bin, pane := herdrBin(), os.Getenv("HERDR_PANE_ID")
 	if bin == "" || pane == "" {
+		logf("kept: not in herdr")
 		return
 	}
 	out, err := exec.Command(bin, "pane", "get", pane).Output()
 	if err != nil {
+		logf("kept: pane lookup failed")
 		return
 	}
 	var res struct {
 		Result struct {
 			Pane struct {
-				TabID string `json:"tab_id"`
+				TabID        string `json:"tab_id"`
+				AgentSession struct {
+					Value string `json:"value"`
+				} `json:"agent_session"`
 			} `json:"pane"`
 		} `json:"result"`
 	}
 	if json.Unmarshal(out, &res) != nil || res.Result.Pane.TabID == "" {
+		logf("kept: no tab for pane")
 		return
 	}
+	if res.Result.Pane.AgentSession.Value != session {
+		logf("kept: pane runs session %q, not this one", short(res.Result.Pane.AgentSession.Value))
+		return
+	}
+	logf("closing tab %s", res.Result.Pane.TabID)
 	// after Claude has finished exiting
 	cmd := exec.Command("sh", "-c", `sleep 1; exec "$0" tab close "$1"`, bin, res.Result.Pane.TabID)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
