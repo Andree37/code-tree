@@ -91,10 +91,8 @@ func cmdWatch(a *Args) {
 			if !ok {
 				return
 			}
-			for _, one := range splitKeys(k) {
-				if !w.key([]byte(one)) {
-					return
-				}
+			if !feed(k, func() bool { return w.inputOn }, func(key string) bool { return w.key([]byte(key)) }) {
+				return
 			}
 		case s := <-sigs:
 			if s != syscall.SIGWINCH {
@@ -649,4 +647,31 @@ func splitKeys(b []byte) []string {
 		i += size
 	}
 	return keys
+}
+
+// pasteKey: while typing, a line break that arrives with more text in the same
+// read is part of a paste, so it becomes a space instead of Enter.
+func pasteKey(typing bool, key string, idx, n int) string {
+	if typing && (key == "\r" || key == "\n") && idx < n-1 {
+		return " "
+	}
+	return key
+}
+
+// feed hands one terminal read to a pane key by key. Pasted text stays text:
+// line breaks inside it become spaces, and once Enter submits what was typed,
+// the rest of that read is dropped instead of being run as hotkeys. It
+// returns false when the pane should close.
+func feed(read []byte, typing func() bool, key func(string) bool) bool {
+	keys := splitKeys(read)
+	for idx, one := range keys {
+		wasTyping := typing()
+		if !key(pasteKey(wasTyping, one, idx, len(keys))) {
+			return false
+		}
+		if wasTyping && !typing() {
+			break
+		}
+	}
+	return true
 }

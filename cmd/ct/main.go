@@ -300,7 +300,7 @@ func cmdAdd(a *Args) {
 	}
 	base := slugify(title)
 	id := base
-	for k := 2; g.Nodes[id] != nil; k++ {
+	for k := 2; g.Nodes[id] != nil || nodeFileExists(g.Dir, id); k++ {
 		id = fmt.Sprintf("%s-%d", base, k)
 	}
 	body := "\n## Context\n"
@@ -351,6 +351,12 @@ func setStatus(a *Args, status, notePrefix string) {
 				checkNote = " (check skipped)"
 			} else {
 				ok, out := runCheck(g, n)
+				// a check can take minutes; anything written meanwhile (a decision,
+				// a note) must survive, so carry on from what is on disk now
+				g = load(g.Dir)
+				if n = g.Nodes[i]; n == nil {
+					die("%s was removed while its check ran", i)
+				}
 				if !ok {
 					appendLog(n, "check failed, stays "+n.Status+": "+oneLine(lastLines(out, 3)), who(a))
 					g.mutate(n)
@@ -531,7 +537,8 @@ func (g *Graph) showText(i string) string {
 	var b strings.Builder
 	n, f := g.Nodes[i], g.Info[i]
 	var chain []string // follow first parent up to a head for the "why" chain
-	for cur := f.Parents; len(cur) > 0; cur = g.Info[cur[0]].Parents {
+	for cur, seen := f.Parents, map[string]bool{i: true}; len(cur) > 0 && !seen[cur[0]]; cur = g.Info[cur[0]].Parents {
+		seen[cur[0]] = true // a loop in old data must not hang ct show
 		chain = append(chain, cur[0])
 	}
 	fmt.Fprintln(&b, n.Title)
@@ -652,7 +659,7 @@ func cmdFmt(*Args) {
 	g := load(requireTree())
 	for _, i := range g.IDs {
 		p := filepath.Join(g.Dir, "nodes", i+".md")
-		if err := os.WriteFile(p, []byte(dumpNode(g.Nodes[i])), 0o644); err != nil {
+		if err := writeAtomic(p, []byte(dumpNode(g.Nodes[i]))); err != nil {
 			die("%v", err)
 		}
 	}

@@ -196,7 +196,7 @@ func writeGraphMD(dir string) {
 		}
 		w("")
 	}
-	if err := os.WriteFile(filepath.Join(dir, "GRAPH.md"), []byte(b.String()), 0o644); err != nil {
+	if err := writeAtomic(filepath.Join(dir, "GRAPH.md"), []byte(b.String())); err != nil {
 		die("%v", err)
 	}
 }

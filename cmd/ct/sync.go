@@ -245,7 +245,7 @@ func writeSync(tree string, s SyncState) {
 	for _, p := range s.Unmapped {
 		fmt.Fprintf(&b, "unmapped %s\n", p)
 	}
-	if err := os.WriteFile(filepath.Join(tree, "sync"), []byte(b.String()), 0o644); err != nil {
+	if err := writeAtomic(filepath.Join(tree, "sync"), []byte(b.String())); err != nil {
 		die("%v", err)
 	}
 }

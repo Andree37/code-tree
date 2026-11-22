@@ -108,13 +108,13 @@ func requireTree() string {
 
 // ---------------------------------------------------------------- parse / dump
 
-func parseNode(text, path string) *Node {
+func parseNode(text, path string) (*Node, error) {
 	if !strings.HasPrefix(text, "---\n") {
-		die("%s: missing frontmatter", path)
+		return nil, fmt.Errorf("%s: missing frontmatter", path)
 	}
 	end := strings.Index(text[3:], "\n---\n")
 	if end < 0 {
-		die("%s: unterminated frontmatter", path)
+		return nil, fmt.Errorf("%s: unterminated frontmatter", path)
 	}
 	end += 3
 	n := &Node{
@@ -178,7 +178,7 @@ func parseNode(text, path string) *Node {
 	if n.Blocks == nil {
 		n.Blocks = []string{}
 	}
-	return n
+	return n, nil
 }
 
 // unquote strips quotes left by older tree files (title: "x").
@@ -247,14 +247,24 @@ func dumpNode(n *Node) string {
 
 func load(dir string) *Graph {
 	g := &Graph{Dir: dir, Nodes: map[string]*Node{}}
-	paths, _ := filepath.Glob(filepath.Join(dir, "nodes", "*.md"))
-	sort.Strings(paths)
-	for _, p := range paths {
+	// ReadDir, not Glob: a folder name with [ ? * must not change what is read
+	entries, _ := os.ReadDir(filepath.Join(dir, "nodes"))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".md") || strings.HasPrefix(name, ".") {
+			continue // editor locks (.#x.md), macOS ._x.md, temp files
+		}
+		p := filepath.Join(dir, "nodes", name)
 		data, err := os.ReadFile(p)
 		if err != nil {
-			die("%v", err)
+			warnOnce(fmt.Sprintf("skipping %s: %v", name, err))
+			continue
 		}
-		n := parseNode(string(data), p)
+		n, err := parseNode(string(data), p)
+		if err != nil {
+			warnOnce("skipping " + err.Error())
+			continue
+		}
 		if _, dup := g.Nodes[n.ID]; !dup {
 			g.IDs = append(g.IDs, n.ID)
 		}
@@ -267,8 +277,37 @@ func load(dir string) *Graph {
 func (g *Graph) save(n *Node) {
 	n.Updated = now()
 	p := filepath.Join(g.Dir, "nodes", n.ID+".md")
-	if err := os.WriteFile(p, []byte(dumpNode(n)), 0o644); err != nil {
+	if err := writeAtomic(p, []byte(dumpNode(n))); err != nil {
 		die("%v", err)
+	}
+}
+
+// writeAtomic replaces a file in one step, so a reader never sees half of it.
+func writeAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-"+filepath.Base(path)+"-")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	_ = os.Chmod(tmp.Name(), 0o644)
+	return os.Rename(tmp.Name(), path)
+}
+
+var warned = map[string]bool{}
+
+// warnOnce reports a problem once per run without stopping ct.
+func warnOnce(msg string) {
+	if !warned[msg] {
+		warned[msg] = true
+		fmt.Fprintln(os.Stderr, "ct: "+msg)
 	}
 }
 
@@ -526,4 +565,11 @@ func (g *Graph) dump() string {
 		}
 	}
 	return b.String()
+}
+
+// nodeFileExists guards new ids against files load could not read: a new node
+// must never overwrite an existing file.
+func nodeFileExists(dir, id string) bool {
+	_, err := os.Lstat(filepath.Join(dir, "nodes", id+".md"))
+	return err == nil
 }

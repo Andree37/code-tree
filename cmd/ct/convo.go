@@ -447,7 +447,7 @@ func askModel(model, prompt, cwd string) (string, error) {
 func newNode(g *Graph, title, agent string, blocks []string) *Node {
 	base := slugify(title)
 	id := base
-	for k := 2; g.Nodes[id] != nil; k++ {
+	for k := 2; g.Nodes[id] != nil || nodeFileExists(g.Dir, id); k++ {
 		id = fmt.Sprintf("%s-%d", base, k)
 	}
 	n := &Node{ID: id, Title: title, Mode: "discuss", Agent: agent, Status: "open", Blocks: blocks,
@@ -857,9 +857,13 @@ settled: the work reached an outcome and the agent only offered optional next st
 				verdict[strings.Trim(strings.TrimSpace(id), "`*-")] = strings.ToLower(strings.TrimSpace(v))
 			}
 		}
+		g = load(tree) // the model call took a while: apply to what is on disk now
 		var changed []*Node
 		for _, i := range waiting {
 			n := g.Nodes[i]
+			if n == nil || n.Status != "needs-you" {
+				continue // changed meanwhile
+			}
 			if strings.HasPrefix(verdict[i], "settled") {
 				n.Status = "done"
 				appendLog(n, "settled on recheck: it was not really waiting on you", "ct recheck")

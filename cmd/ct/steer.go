@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -55,6 +56,9 @@ func cmdMerge(a *Args) {
 	if i == into {
 		die("cannot merge a node into itself")
 	}
+	if g.descendants(i)[into] {
+		die("%s is below %s; merging it there would make a loop (merge the other way round)", into, i)
+	}
 	n, t := g.Nodes[i], g.Nodes[into]
 	ctx := strings.TrimSpace(section(n.Body, "## Context"))
 	note := fmt.Sprintf("merged `%s` (%s) into this", i, n.Title)
@@ -65,14 +69,27 @@ func cmdMerge(a *Args) {
 	t.Touches = append(t.Touches, n.Touches...)
 	addTouches(t, nil)
 	changed := []*Node{t, n}
-	for _, c := range g.Info[i].Children { // children now block the target
+	for _, c := range g.Info[i].Children { // children now block the target, once
 		cn := g.Nodes[c]
-		for k, b := range cn.Blocks {
+		var blocks []string
+		for _, b := range cn.Blocks {
 			if b == i {
-				cn.Blocks[k] = into
+				b = into
+			}
+			if !slices.Contains(blocks, b) {
+				blocks = append(blocks, b)
 			}
 		}
+		cn.Blocks = blocks
 		changed = append(changed, cn)
+	}
+	// what waited on the merged node now waits on the target, so nothing above
+	// it can be finished while the merged work is still open
+	under := g.descendants(into)
+	for _, p := range g.Info[i].Parents {
+		if p != into && !under[p] && !slices.Contains(t.Blocks, p) {
+			t.Blocks = append(t.Blocks, p)
+		}
 	}
 	n.Status = "dropped"
 	appendLog(n, fmt.Sprintf("merged into `%s`", into), who(a))
@@ -147,10 +164,16 @@ func runStaleChecks(g *Graph, head string) []*Node {
 	var changed []*Node
 	for _, i := range g.IDs {
 		n := g.Nodes[i]
-		if len(n.Stale) == 0 || n.Check == "" {
+		if len(n.Stale) == 0 || n.Check == "" || n.Status == "dropped" { // dropped work is never reopened
 			continue
 		}
 		ok, out := runCheck(g, n)
+		// the check may have taken minutes: apply the result to what is on disk now
+		fresh := load(g.Dir)
+		if n = fresh.Nodes[i]; n == nil || len(n.Stale) == 0 || n.Status == "dropped" {
+			continue
+		}
+		g.Nodes[i] = n
 		if ok {
 			appendLog(n, "check passed after changes to "+strings.Join(n.Stale, ", ")+"; no longer stale", "ct sync")
 			n.Stale, n.At = nil, head

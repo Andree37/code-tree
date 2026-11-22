@@ -107,10 +107,8 @@ func cmdSee(a *Args) {
 			if !ok {
 				return
 			}
-			for _, one := range splitKeys(k) {
-				if !s.key(one) {
-					return
-				}
+			if !feed(k, func() bool { return s.inputOn }, s.key) {
+				return
 			}
 		case sg := <-sigs:
 			if sg != syscall.SIGWINCH {
@@ -217,8 +215,11 @@ func (s *seer) reload() {
 			s.sel, s.lastSeen = cur, cur
 		}
 	}
-	if s.g.Nodes[s.head] == nil && len(heads) > 0 {
-		s.head = heads[len(heads)-1]
+	if s.g.Nodes[s.head] == nil { // e.g. a subject from the folder shown before
+		s.head = ""
+		if len(heads) > 0 {
+			s.head = heads[len(heads)-1]
+		}
 	}
 	if s.g.Nodes[s.sel] == nil || (s.head != "" && !inSubtree(s.g, s.head, s.sel)) {
 		s.sel = s.head
@@ -622,6 +623,13 @@ func (s *seer) key(k string) bool {
 			s.pickOn = false
 		}
 		return true
+	}
+	switch k { // keys about the picked box need one
+	case "\r", "\n", "t", "g", "s", "x":
+		if s.g.Nodes[s.sel] == nil {
+			s.msg = "nothing to pick yet: the map fills in as you and Claude talk"
+			return true
+		}
 	}
 	switch k {
 	case "\x1b":
