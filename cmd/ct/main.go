@@ -152,6 +152,7 @@ func init() {
 		{"work", "ID", "ask the agent in this tab (or --to) to work on a node now", []flagSpec{{"to", "", true, "recipient: intercom name, tab, pane:<id>"}, fBy}, cmdWork},
 		{"see", "", "the conversation graph of the package Claude is working in (follows the Claude in this herdr tab)", []flagSpec{{"session", "", true, "follow this session (id, prefix or intercom name)"}}, cmdSee},
 		{"sessions", "", "Claude sessions with a conversation tree", nil, cmdSessions},
+		{"recheck", "", "re-judge every box waiting for you; settle the ones that were only offers", nil, cmdRecheck},
 		{"install", "claude", "add ct's hooks to ~/.claude/settings.json so sessions build their trees", nil, cmdInstall},
 		{"hook", "EVENT", "Claude Code hook entry (prompt, stop, end)", nil, cmdHook},
 		{"turn", "", "place a session's new turns in its package trees (run by the stop hook)", []flagSpec{

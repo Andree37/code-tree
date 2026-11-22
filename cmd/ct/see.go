@@ -671,6 +671,8 @@ func (s *seer) key(k string) bool {
 		s.pinned = false
 		s.reload()
 		s.msg = "following " + s.st["agent"] + " again"
+	case "x":
+		s.toggleWaiting()
 	case "b":
 		s.browser()
 	case "?":
@@ -688,6 +690,7 @@ func (s *seer) key(k string) bool {
 			"  enter       read what happened in that box",
 			"  t           type a message to Claude about that box; it lands in your Claude chat",
 			"  g           ask Claude to go back to that box and continue it",
+			"  x           not really waiting for you? mark it settled (press again to undo)",
 			"",
 			"  o           show the next subject in this folder (if there are several)",
 			"  p           list the code folders you worked in, with their status, and pick one",
@@ -935,4 +938,29 @@ func (s *seer) pickerLines(pw, h int) []string {
 		lines = append(lines, pad("", ""))
 	}
 	return lines[:h]
+}
+
+// toggleWaiting lets the human overrule the model: a box that is not really
+// waiting on them becomes settled, and pressing again puts it back.
+func (s *seer) toggleWaiting() {
+	g := load(s.tree)
+	n := g.Nodes[s.sel]
+	if n == nil || g.Info[s.sel].Kind == "head" {
+		return
+	}
+	switch n.Status {
+	case "needs-you":
+		n.Status = "done"
+		appendLog(n, "you marked it settled: it was not waiting on you", "human")
+		s.msg = "marked settled"
+	case "done":
+		n.Status = "needs-you"
+		appendLog(n, "you marked it as waiting for you again", "human")
+		s.msg = "marked waiting for you"
+	default:
+		s.msg = "x only flips between waiting for you and settled"
+		return
+	}
+	g.mutate(n)
+	s.reload()
 }

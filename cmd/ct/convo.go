@@ -373,8 +373,16 @@ Rules:
 - Continue an existing thread when the turn is still about it.
 - Start a new topic only when the turn is unrelated to every HEAD.
 - When the conversation moves on from a thread that reached its outcome, list it in close.
-- needs-you: the agent ended waiting for the developer's answer or decision.
-  ready: the thread reached a conclusion. open: still being worked on.
+- status is strict:
+  needs-you ONLY when the agent stopped because it cannot go on without the developer: it asked
+    them to choose between options, or to approve something it will not do alone (push, delete,
+    publish, spend), or it needs information only they have.
+  ready when the work or discussion reached an outcome, EVEN IF the agent ends with an optional
+    offer such as "want me to...?", "say if you'd like...", "next I could...", "let me know",
+    "should I build X next?". Offers, suggestions and invitations to test are never needs-you.
+  open while it is still being worked on or discussed.
+- Re-judge every thread marked needs-you in the tree: if the developer's newest message answered
+  it or moved past it, or it was only an optional offer, list it in close.
 - If the developer's message contains "[code-tree · <id>", the turn belongs to thread <id>.
 - A HEAD is never the thread itself. Titles name the subject, not the latest event.
 `)
@@ -422,10 +430,13 @@ func parsePlacement(out string) placement {
 
 // classify asks the small model where a turn goes. Its own session must not
 // join intercom or code-tree, hence the skip variables.
-func classify(prompt, cwd string) (string, error) {
+func classify(prompt, cwd string) (string, error) { return askModel(classifyModel, prompt, cwd) }
+
+// askModel runs a one-shot claude -p with the given model.
+func askModel(model, prompt, cwd string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", classifyModel)
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "CT_SKIP=1", "IC_SKIP=1", "IC_ID=", "CLAUDECODE=")
@@ -777,4 +788,122 @@ var codeExt = map[string]bool{
 	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".py": true, ".rb": true, ".java": true,
 	".kt": true, ".swift": true, ".ml": true, ".mli": true, ".hs": true, ".ex": true, ".exs": true, ".lua": true,
 	".odin": true, ".cs": true, ".scala": true, ".php": true, ".sh": true, ".gd": true, ".sql": true,
+}
+
+// cmdRecheck re-judges every box marked "waiting for you" in every tree with
+// the strict rule, and settles the ones that were only offers or are answered.
+func cmdRecheck(a *Args) {
+	trees, _ := filepath.Glob(filepath.Join(convoHome(), "repos", "*", "*", treeDir))
+	settled, kept := 0, 0
+	for _, tree := range trees {
+		g := load(tree)
+		var waiting []string
+		var b strings.Builder
+		b.WriteString(`Each item below is a thread from a developer's conversation with a coding agent that is
+marked "waiting for the developer". Decide for each whether that is really true.
+
+keep: the agent stopped because it cannot go on without the developer: it asked them to choose
+  between options, to approve something it will not do alone (push, delete, publish, spend), or
+  for information only they have.
+settled: the work reached an outcome and the agent only offered optional next steps ("want me
+  to...?", "say if...", "next I could...", "let me know", invitations to test), or the question
+  was already answered or overtaken later in the conversation.
+
+`)
+		for _, i := range g.IDs {
+			n := g.Nodes[i]
+			if n.Status != "needs-you" {
+				continue
+			}
+			waiting = append(waiting, i)
+			fmt.Fprintf(&b, "id: %s\ntitle: %s\nsummary: %s\nrecent history:\n", i, n.Title, n.Outcome)
+			var logs []string
+			for _, l := range strings.Split(n.Body, "\n") {
+				if m := logLine.FindStringSubmatch(l); m != nil {
+					logs = append(logs, "  "+m[2])
+				}
+			}
+			if len(logs) > 3 {
+				logs = logs[len(logs)-3:]
+			}
+			b.WriteString(strings.Join(logs, "\n") + "\n\n")
+		}
+		if len(waiting) == 0 {
+			continue
+		}
+		// what happened afterwards tells whether a question was overtaken
+		b.WriteString("Everything discussed in this code folder, oldest first (later threads may have answered or overtaken an item):\n")
+		all := append([]string{}, g.IDs...)
+		sort.Slice(all, func(x, y int) bool { return g.Nodes[all[x]].Updated < g.Nodes[all[y]].Updated })
+		for _, i := range all {
+			n := g.Nodes[i]
+			fmt.Fprintf(&b, "- %s [%s, last touched %s]: %s\n", n.Title, n.Status, n.Updated, n.Outcome)
+		}
+		if said := recentPrompts(filepath.Dir(tree), 25); said != "" {
+			b.WriteString("\nWhat the developer said most recently in this repo, oldest first:\n" + said)
+		}
+		b.WriteString("\nReply with one line per item and nothing else: <id>: keep  or  <id>: settled\n")
+		out, err := askModel("sonnet", b.String(), filepath.Dir(tree)) // rare and judgment-heavy: a stronger model
+		if os.Getenv("CT_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "--- %s\n%s\n", tree, out)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", tree, err)
+			continue
+		}
+		verdict := map[string]string{}
+		for _, line := range strings.Split(out, "\n") {
+			if id, v, ok := strings.Cut(line, ":"); ok {
+				verdict[strings.Trim(strings.TrimSpace(id), "`*-")] = strings.ToLower(strings.TrimSpace(v))
+			}
+		}
+		var changed []*Node
+		for _, i := range waiting {
+			n := g.Nodes[i]
+			if strings.HasPrefix(verdict[i], "settled") {
+				n.Status = "done"
+				appendLog(n, "settled on recheck: it was not really waiting on you", "ct recheck")
+				changed = append(changed, n)
+				settled++
+				fmt.Printf("settled  %s\n", n.Title)
+			} else {
+				kept++
+				fmt.Printf("waiting  %s\n", n.Title)
+			}
+		}
+		if len(changed) > 0 {
+			g.mutate(changed...)
+		}
+	}
+	fmt.Printf("\n%d settled, %d still waiting for you\n", settled, kept)
+}
+
+// recentPrompts is what the developer said lately in the repo a package tree
+// belongs to, across its sessions: enough to tell an answered question.
+func recentPrompts(pkgDir string, n int) string {
+	data, err := os.ReadFile(filepath.Join(pkgDir, "pkg"))
+	if err != nil {
+		return ""
+	}
+	root := ""
+	for _, l := range strings.Split(string(data), "\n") {
+		if k, v, ok := strings.Cut(l, " "); ok && k == "repo" {
+			root = v
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Join(convoHome(), "sessions"))
+	var prompts []string
+	for _, e := range entries {
+		st := readConvo(e.Name())
+		if st["repo"] != root || st["transcript"] == "" {
+			continue
+		}
+		for _, t := range readTurns(st["transcript"]) {
+			prompts = append(prompts, "- "+clip(oneLine(t.prompt), 220, false))
+		}
+	}
+	if len(prompts) > n {
+		prompts = prompts[len(prompts)-n:]
+	}
+	return strings.Join(prompts, "\n") + "\n"
 }
