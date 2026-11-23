@@ -880,8 +880,9 @@ func cmdSessions(a *Args) {
 }
 
 // closeTab closes the herdr tab of a Claude session that just exited, so its
-// tree pane goes with it. /clear and /resume end a session inside the same
-// Claude, so those keep the tab. CT_KEEP_TAB=1 turns this off.
+// tree pane goes with it. Off by default: quitting Claude leaves the tab and its
+// shell. CT_CLOSE_TAB=1 turns it on. /clear and /resume end a session inside
+// the same Claude, so those always keep the tab.
 //
 // It only ever closes a tab whose pane herdr reports as running this very
 // session, so a stray "session ended" from any other process (a helper, a
@@ -896,7 +897,10 @@ func closeTab(session, reason string) {
 			f.Close()
 		}
 	}
-	if reason == "clear" || reason == "resume" || os.Getenv("CT_KEEP_TAB") == "1" {
+	if os.Getenv("CT_CLOSE_TAB") != "1" {
+		return
+	}
+	if reason == "clear" || reason == "resume" {
 		logf("kept: %s", reason)
 		return
 	}
