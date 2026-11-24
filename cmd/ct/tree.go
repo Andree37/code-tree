@@ -413,7 +413,7 @@ func (g *Graph) compute() {
 			f.State, f.Label = "needs-you", "Needs you"
 		} else if !resolved(n.Status) && done < len(f.Children) {
 			f.State, f.Label = "waiting", fmt.Sprintf("Waiting %d/%d", done, len(f.Children))
-		} else if resolved(n.Status) && len(n.Stale) > 0 {
+		} else if n.Status == "done" && len(n.Stale) > 0 { // dropped work is never stale
 			f.State, f.Label = "stale", "Stale"
 		} else {
 			f.State, f.Label = n.Status, label(n.Status)

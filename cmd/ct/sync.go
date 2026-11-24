@@ -54,8 +54,7 @@ func loadConfig(tree string) Config {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		line, _, _ := strings.Cut(sc.Text(), "#")
-		k, v, ok := strings.Cut(line, "=")
+		k, v, ok := strings.Cut(stripComment(sc.Text()), "=")
 		if !ok {
 			continue
 		}
@@ -88,6 +87,17 @@ func loadConfig(tree string) Config {
 	return cfg
 }
 
+// stripComment cuts a trailing "# comment": a '#' that starts the line or
+// follows whitespace. A '#' inside a value (a chat command, a path) is kept.
+func stripComment(line string) string {
+	for i := 0; i < len(line); i++ {
+		if line[i] == '#' && (strings.TrimSpace(line[:i]) == "" || line[i-1] == ' ' || line[i-1] == '\t') {
+			return line[:i]
+		}
+	}
+	return line
+}
+
 // ---------------------------------------------------------------- git (read-only)
 
 func git(dir string, args ...string) (string, error) {
@@ -116,28 +126,60 @@ type change struct {
 	Old    string // for renames
 }
 
+// resolveCommit turns a revision into a full commit sha, or reports that it is
+// not a commit here. Revisions come from node files and .tree/sync, which
+// anyone can edit, so one like "--output=x" must never reach git as an option.
+func resolveCommit(cfg Config, rev string) (string, bool) {
+	if rev == "" {
+		return "", false
+	}
+	sha, err := git(cfg.Code, "rev-parse", "--verify", "--quiet", "--end-of-options", rev+"^{commit}")
+	if err != nil || sha == "" {
+		return "", false
+	}
+	return sha, true
+}
+
 func diffNames(cfg Config, from, to string) ([]change, error) {
-	// --relative: paths relative to the code folder, even when it is a subfolder of the git repo
-	out, err := git(cfg.Code, "diff", "--name-status", "-M", "--no-color", "--relative", from, to)
-	if err != nil || out == "" {
+	a, ok := resolveCommit(cfg, from)
+	if !ok {
+		return nil, fmt.Errorf("%q is not a commit in %s", from, cfg.Code)
+	}
+	b, ok := resolveCommit(cfg, to)
+	if !ok {
+		return nil, fmt.Errorf("%q is not a commit in %s", to, cfg.Code)
+	}
+	// --relative: paths relative to the code folder, even when it is a subfolder of the git repo.
+	// -z: paths verbatim (no quoting of non-ASCII names), NUL-separated.
+	out, err := git(cfg.Code, "diff", "--name-status", "-z", "-M", "--no-color", "--relative", "--end-of-options", a, b)
+	if err != nil {
 		return nil, err
 	}
 	var cs []change
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Split(line, "\t")
-		if len(f) < 2 {
+	f := strings.Split(out, "\x00")
+	for k := 0; k < len(f); {
+		st := f[k]
+		k++
+		if st == "" {
 			continue
 		}
-		c := change{Status: f[0][:1], Path: f[len(f)-1]}
-		if (c.Status == "R" || c.Status == "C") && len(f) == 3 {
-			c.Old = f[1]
+		c := change{Status: st[:1]}
+		if (c.Status == "R" || c.Status == "C") && k+1 < len(f) { // renames: old path, then new path
+			c.Old, c.Path = f[k], f[k+1]
+			k += 2
+		} else if k < len(f) {
+			c.Path = f[k]
+			k++
 		}
-		cs = append(cs, c)
+		if c.Path != "" {
+			cs = append(cs, c)
+		}
 	}
 	return cs, nil
 }
 
 // changedSince lists paths changed from rev to HEAD plus uncommitted changes.
+// A rev that is not a commit here (yet to be made, or gone) adds nothing.
 func changedSince(cfg Config, rev string) []string {
 	set := map[string]bool{}
 	if rev != "" {
@@ -147,18 +189,21 @@ func changedSince(cfg Config, rev string) []string {
 			}
 		}
 	}
-	// status paths are relative to the repo root: keep those inside the code folder, relative to it
+	// status paths are relative to the repo root: keep those inside the code folder, relative to it.
+	// --no-optional-locks: never take .git/index.lock, which would break a git command the user runs at the same time.
 	prefix, _ := git(cfg.Code, "rev-parse", "--show-prefix")
-	if out, err := git(cfg.Code, "status", "--porcelain", "--untracked-files=all", "--", "."); err == nil && out != "" {
-		for _, line := range strings.Split(out, "\n") {
-			if len(line) > 3 {
-				p := line[3:]
-				if _, after, ok := strings.Cut(p, " -> "); ok {
-					p = after
-				}
-				if p = strings.Trim(p, `"`); strings.HasPrefix(p, prefix) {
-					set[strings.TrimPrefix(p, prefix)] = true
-				}
+	if out, err := git(cfg.Code, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--", "."); err == nil && out != "" {
+		f := strings.Split(out, "\x00")
+		for k := 0; k < len(f); k++ {
+			e := f[k]
+			if len(e) < 4 {
+				continue
+			}
+			if e[0] == 'R' || e[0] == 'C' || e[1] == 'R' || e[1] == 'C' {
+				k++ // the old path of a rename follows as its own entry
+			}
+			if p := e[3:]; strings.HasPrefix(p, prefix) {
+				set[strings.TrimPrefix(p, prefix)] = true
 			}
 		}
 	}
@@ -172,9 +217,10 @@ func changedSince(cfg Config, rev string) []string {
 
 // ---------------------------------------------------------------- path patterns
 
-// match reports whether a repo path is covered by a pattern:
-// "dir/" covers everything below dir, "a/**" likewise, globs use path.Match,
-// anything else must be the exact path.
+// match reports whether a repo path is covered by a node's touch pattern:
+// "dir/" covers everything below dir, "a/**" likewise, "**/x" matches x at any
+// depth, globs use path.Match, anything else must be the exact path. A touch
+// without '/' (main.go, *.go) is a root path only.
 func match(pat, p string) bool {
 	pat = strings.TrimPrefix(pat, "./")
 	switch {
@@ -195,21 +241,24 @@ func match(pat, p string) bool {
 			s = after
 		}
 	case strings.ContainsAny(pat, "*?["):
-		if ok, _ := path.Match(pat, p); ok {
-			return true
-		}
-		if !strings.Contains(pat, "/") { // bare "*.lock" matches at any depth
-			ok, _ := path.Match(pat, path.Base(p))
-			return ok
-		}
-		return false
-	default: // a bare name (go.sum, package-lock.json) matches at any depth
-		return pat == p || (!strings.Contains(pat, "/") && path.Base(p) == pat)
+		ok, _ := path.Match(pat, p)
+		return ok
+	default:
+		return pat == p
 	}
 }
 
 func matchAny(pats []string, p string) bool {
 	return slices.ContainsFunc(pats, func(pat string) bool { return match(pat, p) })
+}
+
+// ignored reports whether a path matches an ignore pattern. Unlike touches, a
+// bare ignore name or glob (go.sum, *.lock) matches at any depth.
+func ignored(cfg Config, p string) bool {
+	return slices.ContainsFunc(cfg.Ignore, func(pat string) bool {
+		pat = strings.TrimPrefix(pat, "./")
+		return match(pat, p) || !strings.Contains(pat, "/") && match(pat, path.Base(p))
+	})
 }
 
 // ---------------------------------------------------------------- sync state
@@ -270,13 +319,37 @@ func recordCode(g *Graph, n *Node, touches []string) {
 		n.At = head
 		n.Stale = nil
 		delete(n.Extra, "uncommitted")
-		for _, p := range changedSince(cfg, "") { // uncommitted edits to its files: the next commit is its own
-			if matchAny(n.Touches, p) {
-				n.Extra["uncommitted"] = "1"
-				break
+		// Its own files with uncommitted edits: the commit that brings them in is
+		// its own work, not a change after it. Only those paths are recorded, so
+		// edits elsewhere never hide later changes.
+		var own []string
+		for _, p := range changedSince(cfg, "") {
+			if matchAny(n.Touches, p) && !strings.ContainsAny(p, ",\r\n") {
+				own = append(own, p)
 			}
 		}
+		if len(own) > 0 {
+			n.Extra["uncommitted"] = strings.Join(own, ", ")
+		}
 	}
+}
+
+// uncommittedPaths is what recordCode stored; nil when there is none. The
+// older "1" form meant every touched path.
+func uncommittedPaths(n *Node) (paths []string, all bool) {
+	v := n.Extra["uncommitted"]
+	switch v {
+	case "":
+		return nil, false
+	case "1":
+		return nil, true
+	}
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, false
 }
 
 func addTouches(n *Node, ts []string) {
@@ -311,7 +384,7 @@ func recordCodeTouches(g *Graph, n *Node, ts []string) {
 		cfg := loadConfig(g.Dir)
 		var auto []string
 		for _, p := range changedSince(cfg, n.Base) {
-			if !matchAny(cfg.Ignore, p) {
+			if !ignored(cfg, p) {
 				auto = append(auto, p)
 			}
 		}
@@ -397,10 +470,12 @@ func cmdSync(a *Args) {
 		}
 	}
 
-	if st.Head == head { // no new commits: only drop unmapped paths a node now owns
-		kept := slices.DeleteFunc(slices.Clone(st.Unmapped), func(p string) bool {
-			return slices.ContainsFunc(g.IDs, func(i string) bool { return matchAny(g.Nodes[i].Touches, p) })
-		})
+	// a path that a node now owns, or that a new ignore pattern covers, is no longer unmapped
+	claimed := func(p string) bool {
+		return ignored(cfg, p) || slices.ContainsFunc(g.IDs, func(i string) bool { return matchAny(g.Nodes[i].Touches, p) })
+	}
+	if st.Head == head { // no new commits: only drop unmapped paths that are now owned or ignored
+		kept := slices.DeleteFunc(slices.Clone(st.Unmapped), claimed)
 		if len(kept) != len(st.Unmapped) && !dry {
 			st.Unmapped = kept
 			writeSync(dir, st)
@@ -411,12 +486,7 @@ func cmdSync(a *Args) {
 		return
 	}
 	if st.Head != "" && !commitExists(cfg, st.Head) && check {
-		shallow, _ := git(cfg.Code, "rev-parse", "--is-shallow-repository")
-		hint := ""
-		if strings.TrimSpace(shallow) == "true" {
-			hint = " This clone is shallow: fetch full history (e.g. actions/checkout with fetch-depth: 0)."
-		}
-		die("last synced commit %s is not in this clone, so changes since it cannot be checked.%s", short(st.Head), hint)
+		die("last synced commit %s is not in this clone, so changes since it cannot be checked.%s", short(st.Head), shallowHint(cfg))
 	}
 	if st.Head == "" || !commitExists(cfg, st.Head) {
 		if st.Head != "" {
@@ -457,21 +527,38 @@ func cmdSync(a *Args) {
 	}
 
 	// For nodes resolved after the last sync, only changes after their own
-	// commit count; cache one diff per distinct resolution commit.
+	// commit count; cache one diff per distinct resolution commit. A commit
+	// that is no longer here (rebased away, or cut off by a shallow clone)
+	// cannot rule a change out, so every change counts.
 	since := map[string]map[string]bool{}
+	gone := map[string]bool{}
 	changedAfter := func(n *Node, p string) bool {
-		if n.At == "" || n.At == st.Head || isAncestor(cfg, n.At, st.Head) {
+		if n.At == "" || n.At == st.Head {
+			return true
+		}
+		if isGone, seen := gone[n.At]; seen && isGone {
+			return true
+		} else if !seen {
+			gone[n.At] = !commitExists(cfg, n.At)
+			if gone[n.At] {
+				fmt.Fprintf(os.Stderr, "ct: %s was resolved at %s, which is not in this repo (rebased away?); every later change to its files counts.%s\n", n.ID, short(n.At), shallowHint(cfg))
+				return true
+			}
+		}
+		if isAncestor(cfg, n.At, st.Head) {
 			return true
 		}
 		set, ok := since[n.At]
 		if !ok {
+			cs, err := diffNames(cfg, n.At, head)
+			if err != nil {
+				die("%v", err)
+			}
 			set = map[string]bool{}
-			if cs, err := diffNames(cfg, n.At, head); err == nil {
-				for _, c := range cs {
-					set[c.Path] = true
-					if c.Old != "" {
-						set[c.Old] = true
-					}
+			for _, c := range cs {
+				set[c.Path] = true
+				if c.Old != "" {
+					set[c.Old] = true
 				}
 			}
 			since[n.At] = set
@@ -481,6 +568,7 @@ func cmdSync(a *Args) {
 
 	prevUnmapped := strings.Join(st.Unmapped, "\n")
 	touched := map[string]*Node{}
+	ownCommitted := map[string]bool{}
 	logs := map[string][]string{}
 	unmapped := map[string]bool{}
 	for _, p := range st.Unmapped {
@@ -507,7 +595,7 @@ func cmdSync(a *Args) {
 		if len(ids) == 0 {
 			if c.Status == "D" {
 				delete(unmapped, c.Path) // a deleted file needs no owner any more
-			} else if !matchAny(cfg.Ignore, c.Path) {
+			} else if !ignored(cfg, c.Path) {
 				unmapped[c.Path] = true
 			}
 			continue
@@ -515,14 +603,13 @@ func cmdSync(a *Args) {
 		delete(unmapped, c.Path)
 		for _, i := range ids {
 			n := g.Nodes[i]
-			if !resolved(n.Status) || !changedAfter(n, c.Path) && !(c.Old != "" && changedAfter(n, c.Old)) {
+			// only done work goes stale: dropped, rejected and merged nodes are never picked up again
+			if n.Status != "done" || !changedAfter(n, c.Path) && !(c.Old != "" && changedAfter(n, c.Old)) {
 				continue
 			}
-			if n.Extra["uncommitted"] == "1" { // resolved before its work was committed: this commit is its own
-				delete(n.Extra, "uncommitted")
-				n.At = head
-				touched[i] = n
-				logs[i] = append(logs[i], "its own work was committed")
+			// resolved before its work was committed: the commit bringing in those files is its own
+			if own, all := uncommittedPaths(n); all || slices.Contains(own, c.Path) || c.Old != "" && slices.Contains(own, c.Old) {
+				ownCommitted[i] = true
 				continue
 			}
 			what := c.Path
@@ -537,9 +624,19 @@ func cmdSync(a *Args) {
 		}
 	}
 
-	// files that a node claims now (touches added since) are no longer unmapped
+	for i := range ownCommitted {
+		n := g.Nodes[i]
+		delete(n.Extra, "uncommitted")
+		if len(n.Stale) == 0 { // nothing else changed after it: it is current as of this commit
+			n.At = head
+		}
+		touched[i] = n
+		logs[i] = append(logs[i], "its own work was committed")
+	}
+
+	// files that a node claims now (touches added since), or that a new ignore pattern covers, are no longer unmapped
 	for p := range unmapped {
-		if len(owners(p)) > 0 {
+		if claimed(p) {
 			delete(unmapped, p)
 		}
 	}
@@ -571,12 +668,25 @@ func cmdSync(a *Args) {
 	report(len(changed))
 }
 
-func commitExists(cfg Config, sha string) bool {
-	_, err := git(cfg.Code, "cat-file", "-e", sha+"^{commit}")
+func commitExists(cfg Config, rev string) bool {
+	_, ok := resolveCommit(cfg, rev)
+	return ok
+}
+
+// isAncestor reports whether a is an ancestor of b; both must be commits here.
+func isAncestor(cfg Config, a, b string) bool {
+	x, ok1 := resolveCommit(cfg, a)
+	y, ok2 := resolveCommit(cfg, b)
+	if !ok1 || !ok2 {
+		return false
+	}
+	_, err := git(cfg.Code, "merge-base", "--is-ancestor", x, y)
 	return err == nil
 }
 
-func isAncestor(cfg Config, a, b string) bool {
-	_, err := git(cfg.Code, "merge-base", "--is-ancestor", a, b)
-	return err == nil
+func shallowHint(cfg Config) string {
+	if s, _ := git(cfg.Code, "rev-parse", "--is-shallow-repository"); strings.TrimSpace(s) == "true" {
+		return " This clone is shallow: fetch full history (e.g. actions/checkout with fetch-depth: 0)."
+	}
+	return ""
 }

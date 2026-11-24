@@ -83,10 +83,11 @@ func TestChecksAndGlobsKeepTheirCharacters(t *testing.T) {
 }
 
 func TestBareIgnoreNamesMatchAnyDepth(t *testing.T) {
-	if !match("package-lock.json", "web/package-lock.json") || !match("go.sum", "tools/go.sum") {
+	cfg := Config{Ignore: []string{"package-lock.json", "go.sum"}}
+	if !ignored(cfg, "web/package-lock.json") || !ignored(cfg, "tools/go.sum") {
 		t.Error("bare lockfile names should match in subfolders")
 	}
-	if match("go.sum", "go.summary") {
+	if ignored(cfg, "go.summary") {
 		t.Error("bare name matched a different file")
 	}
 }
