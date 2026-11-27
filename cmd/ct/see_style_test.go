@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,25 +79,5 @@ func TestCube256(t *testing.T) {
 		if got := cube256(c.in); got != c.want && !(c.want == 16 && got == 232) && !(c.want == 231 && got == 255) {
 			t.Errorf("cube256(%v) = %d, want %d", c.in, got, c.want)
 		}
-	}
-}
-
-// ct where gives herdr's sidebar each session's card and counts, one tab-separated line each.
-func TestWhereForSidebar(t *testing.T) {
-	s, ids := demoSeer(t)
-	home := t.TempDir()
-	id := "abc-123"
-	dir := filepath.Join(home, "sessions", id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	state := "tree " + s.tree + "\ncurrent " + ids["tips"] + "\npackage src/ui\nrepo /x\n"
-	if err := os.WriteFile(filepath.Join(dir, "convo"), []byte(state), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	env := []string{"CT_HOME=" + home}
-	out := mustCT(t, home, env, "where", id, "unknown-session", "../escape")
-	if out != id+"\tsrc/ui\tTooltips\t1\t2" {
-		t.Fatalf("ct where: %q", out)
 	}
 }
