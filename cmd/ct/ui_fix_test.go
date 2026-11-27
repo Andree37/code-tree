@@ -53,7 +53,22 @@ func TestTermSafeKeepsColoursDropsEscapes(t *testing.T) {
 func TestWatchDrawsNoAgentEscapes(t *testing.T) {
 	dir := newTree(t)
 	osc := "\x1b]52;c;cm0gLXJmIH4K\x07"
-	id := mustCT(t, dir, agentEnv, "add", "Refactor", "-m", "build"+osc, "-t", "a"+osc+".go")
+	// The CLI refuses control characters, so plant them the way an agent
+	// writing the file directly would.
+	id := mustCT(t, dir, agentEnv, "add", "Refactor", "-m", "build", "-t", "a.go")
+	file := filepath.Join(dir, treeDir, "nodes", id+".md")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(data), "mode: build", "mode: build"+osc, 1)
+	text = strings.Replace(text, "touches: a.go", "touches: a"+osc+".go", 1)
+	if text == string(data) {
+		t.Fatalf("could not plant the escapes in:\n%s", data)
+	}
+	if err := os.WriteFile(file, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	w := &watcher{tree: filepath.Join(dir, treeDir), view: "next", results: make(chan string, 4), w: 100, h: 30}
 	w.reload()
 	w.sel = id

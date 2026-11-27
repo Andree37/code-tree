@@ -1075,6 +1075,12 @@ func (s *seer) pickerLines(pw, h int) []string {
 const settledNote = "you marked it settled: it was not waiting on you (it said: "
 
 func (s *seer) toggleWaiting() {
+	tree := s.tree
+	if abs, err := filepath.Abs(tree); err == nil {
+		tree = abs // the lock is keyed by the absolute path, as the CLI takes it
+	}
+	release := lockTree(tree) // a worker or the CLI may be changing the same tree
+	defer release()
 	g := load(s.tree)
 	n := g.Nodes[s.sel]
 	if n == nil || g.Info[s.sel].Kind == "head" {
