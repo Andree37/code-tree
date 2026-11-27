@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	boxW   = 28 // outer width of a node box
+	boxW   = 34 // outer width of a card, its half-block frame included
 	boxH   = 5  // outer height
 	slotW  = boxW + 3
-	layerH = boxH + 1 // the joining line runs in the one row between layers
+	layerH = boxH + 3 // three rows between layers: a stem, the rail, then the arrow
 )
 
 type cell struct {
@@ -368,6 +368,8 @@ func (s *seer) text(x, y int, str, color string) {
 
 func hot(state string) bool { return state == "needs-you" || state == "ready" }
 
+// drawEdges joins a card to its points: down from the card, along a rounded
+// rail, and an arrow into each point's card.
 func (s *seer) drawEdges(id string) {
 	var kids []string
 	for _, c := range s.g.Info[id].Children {
@@ -379,29 +381,32 @@ func (s *seer) drawEdges(id string) {
 		return
 	}
 	p := s.pos[id]
-	pc, y := p[0]+boxW/2, p[1]+boxH
+	pc, y := p[0]+boxW/2, p[1]+boxH+1 // y: the rail; the stem is the row above it
 	minc, maxc := pc, pc
 	for _, c := range kids {
 		cc := s.pos[c][0] + boxW/2
 		minc, maxc = min(minc, cc), max(maxc, cc)
 	}
-	edge := cDim
+	edgeCol := func(c string) string {
+		if s.g.Info[c].State == "needs-you" {
+			return fg(colEdgeHot)
+		}
+		return fg(colEdge)
+	}
+	rail := fg(colEdge)
 	for _, c := range kids {
-		if hot(s.g.Info[c].State) {
-			edge = cOrange
+		if s.g.Info[c].State == "needs-you" {
+			rail = fg(colEdgeHot)
 		}
 	}
-	s.put(pc, y-1, '┬', edge) // out of the parent's bottom border
+	s.put(pc, y-1, '│', rail)
 	for x := minc; x <= maxc; x++ {
-		s.put(x, y, '─', edge)
+		s.put(x, y, '─', rail)
 	}
 	for _, c := range kids {
 		cc := s.pos[c][0] + boxW/2
-		col := cDim
-		if hot(s.g.Info[c].State) {
-			col = cOrange
-		}
-		s.put(cc, y+1, '┴', col) // into the child's top border
+		col := edgeCol(c)
+		s.put(cc, y+1, '▼', col)
 		switch {
 		case minc == maxc:
 			s.put(cc, y, '│', col)
@@ -415,20 +420,23 @@ func (s *seer) drawEdges(id string) {
 	}
 	if minc != maxc {
 		j := '┴'
-		if pc == minc || pc == maxc {
-			j = '┼'
-			if pc == minc {
-				j = '├'
-			} else {
-				j = '┤'
-			}
+		switch pc {
+		case minc:
+			j = '╰'
+		case maxc:
+			j = '╯'
 		}
 		for _, c := range kids {
 			if s.pos[c][0]+boxW/2 == pc {
 				j = '┼'
+				if pc == minc {
+					j = '├'
+				} else if pc == maxc {
+					j = '┤'
+				}
 			}
 		}
-		s.put(pc, y, j, edge)
+		s.put(pc, y, j, rail)
 	}
 }
 
@@ -458,65 +466,84 @@ func wrapTitle(t string, width, lines int) []string {
 	return out
 }
 
+// drawBox draws one card: a filled block whose half-cell frame takes the
+// card's own colour, yellow for the card Claude is on, white for the one you
+// picked. Inside: a dot when Claude is here, the title, "+" to branch off it,
+// and its badges.
 func (s *seer) drawBox(id string) {
 	n, f := s.g.Nodes[id], s.g.Info[id]
 	p := s.pos[id]
 	x, y := p[0], p[1]
-	border := cDim
-	if hot(f.State) {
-		border = cOrange
+	st := styleFor(f)
+	here := id == s.st["current"]
+	frame := st.fill
+	switch {
+	case id == s.sel:
+		frame = colSelected
+	case here:
+		frame = colGlow
 	}
-	if f.State == "done" || f.State == "dropped" {
-		border = cDim
-	}
-	// the selected box gets a thick, bright frame so moving is obvious
-	tl, tr, bl, br, hz, vt := '╭', '╮', '╰', '╯', '─', '│'
-	if id == s.sel {
-		border = cBold + cWhite
-		tl, tr, bl, br, hz, vt = '┏', '┓', '┗', '┛', '━', '┃'
+	fill := bg(st.fill)
+	fr := fg(frame)
+	right, bottom := x+boxW-1, y+boxH-1
+	s.put(x, y, '▗', fr)
+	s.put(right, y, '▖', fr)
+	s.put(x, bottom, '▝', fr)
+	s.put(right, bottom, '▘', fr)
+	for i := x + 1; i < right; i++ {
+		s.put(i, y, '▄', fr)
+		s.put(i, bottom, '▀', fr)
 	}
 	inner := boxW - 2
-	s.put(x, y, tl, border)
-	s.put(x+boxW-1, y, tr, border)
-	s.put(x, y+boxH-1, bl, border)
-	s.put(x+boxW-1, y+boxH-1, br, border)
-	for i := 1; i < boxW-1; i++ {
-		s.put(x+i, y, hz, border)
-		s.put(x+i, y+boxH-1, hz, border)
+	for j := y + 1; j < bottom; j++ {
+		s.put(x, j, '▐', fr) // the half next to the fill is the frame, the outer half stays clear
+		s.put(right, j, '▌', fr)
+		s.text(x+1, j, strings.Repeat(" ", inner), fill)
 	}
-	for j := 1; j < boxH-1; j++ {
-		s.put(x, y+j, vt, border)
-		s.put(x+boxW-1, y+j, vt, border)
-		s.text(x+1, y+j, strings.Repeat(" ", inner), "")
+
+	text := fill + fg(st.text)
+	if st.bold || id == s.sel {
+		text += cBold
 	}
-	kind := ""
-	if f.Kind == "head" {
-		kind = "SUBJECT"
+	if here {
+		s.text(x+2, y+1, "●", fill+fg(colGlow))
 	}
-	if id == s.st["current"] {
-		kind = "● Claude is here"
+	s.text(right-3, y+1, " + ", bg(st.chip)+fg(st.text))
+	lines := wrapTitle(n.Title, inner-6, 2) // room for the dot on the left and + on the right
+	for k, line := range lines {
+		pad := (inner - visible(line)) / 2
+		s.text(x+1+pad, y+1+k, line, text)
 	}
-	label := plainLabel(f)
-	labelColor := cDim
-	switch f.State {
-	case "needs-you", "ready":
-		labelColor = cOrange
-	case "done":
-		labelColor = cGreen
+
+	cx := x + 2
+	for _, c := range s.badges(id).chips(st) {
+		if cx+visible(c[0]) > right-1 {
+			break
+		}
+		s.text(cx, y+3, c[0], c[1])
+		cx += visible(c[0]) + 1
 	}
-	kindColor := cDim
-	if id == s.st["current"] {
-		kindColor = cBlue
+	if word := cardWord(f); word != "" && cx+visible(word) < right-1 {
+		s.text(right-1-visible(word), y+3, word, fill+fg(colMuted))
 	}
-	s.text(x+2, y+1, cut(kind, inner-visible(label)-3), kindColor)
-	s.text(x+boxW-2-visible(label), y+1, label, labelColor)
-	titleColor := ""
-	if id == s.sel {
-		titleColor = cBold
+}
+
+// cardWord is the short state shown in a card's corner, for states the colour
+// alone does not say well.
+func cardWord(f *Info) string {
+	switch {
+	case f.Kind == "head":
+		return "subject"
+	case f.State == "needs-you":
+		return "for you"
+	case f.State == "proposed":
+		return "proposed"
+	case f.State == "stale":
+		return "stale"
+	case f.State == "dropped":
+		return "dropped"
 	}
-	for k, line := range wrapTitle(n.Title, inner-2, 2) {
-		s.text(x+2, y+2+k, line, titleColor)
-	}
+	return ""
 }
 
 func (s *seer) render() {
@@ -533,13 +560,24 @@ func (s *seer) render() {
 		state = "Claude in this tab has ended"
 	}
 	head := fmt.Sprintf(" What you and Claude discussed in %s/", pkgName(s.root, s.pkg))
+	if heads := s.g.heads(); len(heads) > 1 {
+		for i, h := range heads {
+			if h == s.head {
+				head += fmt.Sprintf("   subject %d of %d (o: next)", i+1, len(heads))
+			}
+		}
+	}
 	right := state
 	pad := s.w - visible(head) - visible(right) - 1
 	if pad < 1 {
 		pad = 1
 	}
 	add(cBold, head+strings.Repeat(" ", pad)+right)
-	add(cDim, strings.Repeat("─", s.w))
+	if visible(stripSGR(legend())) <= s.w {
+		out = append(out, legend()+cReset)
+	} else {
+		add(cDim, strings.Repeat("─", s.w))
+	}
 
 	if s.overlay != nil {
 		for _, l := range s.overlay {
@@ -647,7 +685,7 @@ func (s *seer) render() {
 	if s.inputOn {
 		add(cOrange, " "+s.prompt+" › "+string(s.input)+"▏")
 	} else {
-		help := "arrows: pick a box · enter: read it · t: ask Claude about it · g: tell Claude to go back to it · p: folders · ?: help · q: close"
+		help := "arrows: pick a card · enter: read it · +: branch a new idea off it · t: ask Claude about it · g: go back to it · p: folders · ?: help · q: close"
 		if s.msg != "" { // the message first: the help line is wider than most panes
 			add("", " "+s.msg+cDim+"   "+help)
 		} else {
@@ -720,7 +758,7 @@ func (s *seer) key(k string) bool {
 		return true
 	}
 	switch k { // keys about the picked box need one
-	case "\r", "\n", "t", "g", "s", "x":
+	case "\r", "\n", "t", "g", "s", "x", "+", "=":
 		if s.g.Nodes[s.sel] == nil {
 			s.msg = "nothing to pick yet: the map fills in as you and Claude talk"
 			return true
@@ -754,6 +792,9 @@ func (s *seer) key(k string) bool {
 		s.ask("talk to "+s.st["agent"]+" about “"+title+"”", func(t string) {
 			s.send(fmt.Sprintf("[code-tree · %s · %s · %s]\n%s", pkgName(s.root, s.pkg), id, title, t))
 		})
+	case "+", "=": // = is + without shift
+		parent, title := s.sel, s.g.Nodes[s.sel].Title
+		s.ask("new idea branching off “"+title+"”", func(t string) { s.branch(parent, t) })
 	case "g", "s":
 		n, id := s.g.Nodes[s.sel], s.sel
 		if n.Status == "needs-you" { // Claude is waiting on an answer: ask for it, never hand back its own question
@@ -790,13 +831,15 @@ func (s *seer) key(k string) bool {
 			"  A map of what you and Claude have talked about while working in this code folder.",
 			"  It updates by itself after every Claude reply.",
 			"",
-			"  The top box is the SUBJECT. Each box under it is one point you went into.",
-			"  Orange \"Waiting for you\": Claude asked you something there.",
-			"  \"Settled\": that point was decided.   \"● Claude is here\": what Claude is on now.",
+			"  The top card is the SUBJECT. Each card under it is one point you went into.",
+			"  Blue: still open.  Green: settled.  Amber: Claude asked you something there.",
+			"  Yellow frame and ●: what Claude is on now.  White frame: the card you picked.",
+			"  Badges: !n points waiting for you below it, ?n still open, Dn decisions made, k/n points settled.",
 			"",
 			cBold + "Keys" + cReset,
 			"  arrows      pick a box (the thick frame is the one picked)",
 			"  enter       read what happened in that box",
+			"  +           branch a new idea off that card: it appears under it and goes to Claude",
 			"  t           type a message to Claude about that box; it lands in your Claude chat",
 			"  g           ask Claude to go back to that box and continue it",
 			"  x           not really waiting for you? mark it settled (press again to undo)",
@@ -1121,4 +1164,44 @@ func (s *seer) paste(text string) {
 		return
 	}
 	s.input = append(s.input, []rune(pasteText(text))...)
+}
+
+// branch adds a new idea under a card, as Prime's "+": the card appears in the
+// tree at once, and the idea goes to Claude tagged with it, so the turn that
+// follows lands on the new card instead of being guessed.
+func (s *seer) branch(parent, text string) {
+	if icBin() == "" {
+		s.msg = "needs intercom: " + icInstall
+		return
+	}
+	if s.ended {
+		s.msg = "the Claude in this tab has ended: start it again to branch off a card"
+		return
+	}
+	tree := s.tree
+	if abs, err := filepath.Abs(tree); err == nil {
+		tree = abs
+	}
+	release := lockTree(tree)
+	g := load(s.tree)
+	pn := g.Nodes[parent]
+	if pn == nil {
+		release()
+		s.msg = "that card is gone"
+		return
+	}
+	n := newNode(g, clip(oneLine(text), 48, false), s.st["agent"], []string{parent})
+	appendLog(n, "you branched this off “"+oneLine(pn.Title)+"”: "+oneLine(text), "human")
+	changed := []*Node{n}
+	if g.Info[parent] != nil && g.Info[parent].Kind != "head" && (pn.Status == "done" || pn.Status == "ready") {
+		pn.Status = "open" // a new idea under a settled point opens it again
+		appendLog(pn, "reopened: you branched `"+n.ID+"` off it", "human")
+		changed = append(changed, pn)
+	}
+	g.mutate(changed...)
+	release()
+	s.reload()
+	s.sel = n.ID
+	pkg := pkgName(s.root, s.pkg)
+	s.send(fmt.Sprintf("[code-tree · %s · %s · %s]\nNew idea, branching off “%s”: %s", pkg, n.ID, n.Title, pn.Title, text))
 }
