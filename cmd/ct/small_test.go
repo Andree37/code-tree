@@ -135,7 +135,7 @@ func TestSyncInSubfolderOfRepo(t *testing.T) {
 	write(t, filepath.Join(repo, "other/x.go"), "x2")
 	git_(t, repo, "commit", "-qam", "change")
 	out := mustCT(t, app, nil, "sync")
-	if !strings.Contains(out, "stale") || strings.Contains(out, "other/x.go") {
+	if !strings.Contains(out, "stale    "+id+"  (src/a.go)") || strings.Contains(out, "other/x.go") {
 		t.Fatalf("want a.go stale and nothing outside app/ reported:\n%s", out)
 	}
 }

@@ -485,7 +485,8 @@ func askModel(model, prompt, cwd string) (string, error) {
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Dir = cwd
 	cmd.Env = helperEnv()
-	out, err := cmd.Output()
+	var out []byte
+	err := runGroup(cmd, func() error { var e error; out, e = cmd.Output(); return e })
 	return string(out), err
 }
 
@@ -503,6 +504,7 @@ func newNode(g *Graph, title, agent string, blocks []string) *Node {
 
 // apply puts a turn into a package tree and returns the thread it landed on.
 func apply(tree, agent string, p placement) string {
+	defer lockTree(tree)() // a pane or another worker may be changing the same tree
 	g := load(tree)
 	changed := map[string]*Node{}
 	mark := func(n *Node) { changed[n.ID] = n }
@@ -814,7 +816,7 @@ def ct_entry($cmd): {hooks: [{type: "command", command: $cmd, timeout: 10}]};
 | reduce $evs[] as $e (.;
     .hooks[$e.event] = (
       (.hooks[$e.event] // [])
-      | map(.hooks |= map(select((.command // "") | test("(^|/)ct hook ") | not)))
+      | map(.hooks |= map(select((.command // "") | test("(^|/)ct'? hook ") | not)))
       | map(select((.hooks | length) > 0))
     ) + [ct_entry($e.cmd)]
   )`
@@ -833,8 +835,16 @@ func cmdInstall(a *Args) {
 	if err != nil || strings.Contains(exe, "go-build") {
 		die("run an installed ct (go install ./cmd/ct), not `go run`")
 	}
+	if strings.ContainsFunc(exe, func(r rune) bool { // the hook command runs in a shell
+		return !(r == '/' || r == '.' || r == '_' || r == '-' || r == '+' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+	}) {
+		exe = shellQuote(exe)
+	}
 	h, _ := os.UserHomeDir()
 	path := filepath.Join(h, ".claude", "settings.json")
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real // a settings.json linked from dotfiles stays a link; its target is updated
+	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		data = []byte("{}")
@@ -1017,10 +1027,15 @@ settled: the work reached an outcome and the agent only offered optional next st
 		verdict := map[string]string{}
 		for _, line := range strings.Split(out, "\n") {
 			if id, v, ok := strings.Cut(line, ":"); ok {
-				verdict[strings.Trim(strings.TrimSpace(id), "`*-")] = strings.ToLower(strings.TrimSpace(v))
+				id = strings.TrimLeft(strings.TrimSpace(id), "-*•+ \t") // "- id", "* id", "1. id"
+				if k := strings.Index(id, ". "); k > 0 && strings.Trim(id[:k], "0123456789") == "" {
+					id = id[k+2:]
+				}
+				verdict[strings.Trim(strings.TrimSpace(id), "`*_ ")] = strings.ToLower(strings.Trim(strings.TrimSpace(v), "`*_ "))
 			}
 		}
-		g = load(tree) // the model call took a while: apply to what is on disk now
+		release := lockTree(tree) // the model call took a while: apply to what is on disk now
+		g = load(tree)
 		var changed []*Node
 		for _, i := range waiting {
 			n := g.Nodes[i]
@@ -1046,6 +1061,7 @@ settled: the work reached an outcome and the agent only offered optional next st
 			})
 			g.mutate(changed...)
 		}
+		release()
 	}
 	fmt.Printf("\n%d settled, %d still waiting for you\n", settled, kept)
 }

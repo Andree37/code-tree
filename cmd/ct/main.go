@@ -116,6 +116,16 @@ var (
 
 var commands []command
 
+// lockedCommands change the tree, so they hold its lock from load to save.
+// Long-running views (watch, see, serve), edit and chat (whose agent runs ct
+// itself) do not.
+var lockedCommands = map[string]bool{
+	"add": true, "claim": true, "ask": true, "ready": true, "done": true, "drop": true, "open": true,
+	"set": true, "accept": true, "reject": true, "merge": true, "check": true, "answer": true,
+	"decide": true, "talk": true, "work": true, "run": true, "note": true, "link": true, "unlink": true,
+	"rm": true, "touch": true, "sync": true, "ack": true, "fmt": true,
+}
+
 func init() {
 	commands = []command{
 		{"init", "", "create .tree/ in the current directory", []flagSpec{{"code", "", true, "path of the code repo (default: this directory)"}}, cmdInit},
@@ -226,13 +236,13 @@ func need(a *Args, n int, cmd string) {
 
 func who(a *Args) string {
 	// an agent may name itself with --by, but never claim to be the human
-	if by := a.Get("by", ""); by != "" && !(inAgent() && strings.EqualFold(by, "human")) {
+	if by := plainValue("--by", strings.TrimSpace(a.Get("by", ""))); by != "" && !(inAgent() && strings.EqualFold(by, "human")) {
 		return by
 	}
-	if env := os.Getenv("CT_AGENT"); env != "" {
+	if env := plainValue("CT_AGENT", strings.TrimSpace(os.Getenv("CT_AGENT"))); env != "" {
 		return env
 	}
-	if me := icMe(); me != "" { // this agent session's intercom name
+	if me := flat(icMe()); me != "" { // this agent session's intercom name
 		return me
 	}
 	if os.Getenv("CLAUDECODE") == "1" {
@@ -258,10 +268,12 @@ func appendLog(n *Node, text, by string) {
 	if !strings.Contains(body, "## Log") {
 		body += "\n\n## Log"
 	}
-	n.Body = body + fmt.Sprintf("\n- %s [%s] %s\n", now(), by, text)
+	n.Body = body + fmt.Sprintf("\n- %s [%s] %s\n", now(), strings.ReplaceAll(flat(by), "]", ")"), flat(text))
 }
 
-func oneLine(s string) string { return strings.ReplaceAll(s, "\n", " ") }
+// oneLine makes free text fit one line: newlines and other control
+// characters become spaces.
+func oneLine(s string) string { return flat(s) }
 
 func cmdInit(a *Args) {
 	cwd, _ := os.Getwd()
@@ -318,7 +330,7 @@ func cmdAdd(a *Args) {
 	}
 	body += "\n## Log\n"
 	n := &Node{
-		ID: id, Title: title, Mode: a.Get("mode", "build"), Agent: a.Get("agent", ""), Status: status,
+		ID: id, Title: title, Mode: plainValue("--mode", a.Get("mode", "build")), Agent: plainValue("--agent", a.Get("agent", "")), Status: status,
 		Blocks: append([]string{}, parents...), Created: now(), Extra: map[string]string{}, Body: body,
 	}
 	if n.Blocks == nil {
@@ -331,25 +343,33 @@ func cmdAdd(a *Args) {
 	n.Check = oneLine(a.Get("check", ""))
 	appendLog(n, "created", who(a))
 	changed := []*Node{n}
+	g.Nodes[id] = n
 	for _, p := range parents { // a new child reopens a resolved/ready parent (a proposal only once accepted)
-		if status == "proposed" {
-			break
-		}
-		if pn := g.Nodes[p]; pn.Status == "done" || pn.Status == "ready" {
-			pn.Status = "open"
-			appendLog(pn, fmt.Sprintf("reopened: new prerequisite `%s`", id), who(a))
-			changed = append(changed, pn)
-		}
+		changed = append(changed, reopenFor(g, p, id, "new", who(a))...)
 	}
 	g.mutate(changed...)
 	fmt.Println(id)
 }
 
-func setStatus(a *Args, status, notePrefix string) {
-	need(a, 1, "set")
-	g := load(requireTree())
-	i := g.resolve(a.Pos[0])
+// statusGuards refuses a status change the rules do not allow. It runs again
+// after a slow check, against what is on disk then.
+func statusGuards(a *Args, g *Graph, i, status string) {
 	n, f := g.Nodes[i], g.Info[i]
+	by := who(a)
+	if n.Status == "proposed" && status != "proposed" && by != "human" {
+		die("%s is only proposed; a human has to `ct accept` (or `ct reject`) it first", i)
+	}
+	if status == "working" {
+		if n.Status == "dropped" {
+			die("%s was dropped; a human has to reopen it (`ct open %s`) before it can be claimed", i, i)
+		}
+		if n.Status == "working" && n.Agent != "" && n.Agent != by && !a.Bool("force") {
+			die("%s is already claimed by %s (use --force to take it)", i, n.Agent)
+		}
+		if f.State == "waiting" && !a.Bool("force") {
+			die("%s is %s; pick something from `ct next`", i, f.Label)
+		}
+	}
 	if (status == "done" || status == "ready") && !a.Bool("force") {
 		open := 0 // count children directly: a proposed or waiting-for-you label hides them
 		for _, c := range f.Children {
@@ -360,30 +380,44 @@ func setStatus(a *Args, status, notePrefix string) {
 		if open > 0 {
 			die("%s has %d unresolved point(s) under it; resolve them first (or --force)", i, open)
 		}
-	}
-	checkNote := ""
-	if status == "done" || status == "ready" {
-		if n.Mode == "discuss" && a.Get("outcome", n.Outcome) == "" && !a.Bool("force") {
+		if n.Mode == "discuss" && a.Get("outcome", n.Outcome) == "" {
 			die("%s is a discuss node: close it with the decision, --outcome \"...\"", i)
 		}
-		if n.Check != "" {
-			if a.Bool("skip-check") {
-				checkNote = " (check skipped)"
-			} else {
-				ok, out := runCheck(g, n)
-				// a check can take minutes; anything written meanwhile (a decision,
-				// a note) must survive, so carry on from what is on disk now
-				g = load(g.Dir)
-				if n = g.Nodes[i]; n == nil {
-					die("%s was removed while its check ran", i)
-				}
-				if !ok {
-					appendLog(n, "check failed, stays "+n.Status+": "+oneLine(lastLines(out, 3)), who(a))
-					g.mutate(n)
-					die("check failed for %s: %s\n%s", i, n.Check, lastLines(out, 15))
-				}
-				checkNote = " (check passed)"
+	}
+}
+
+func setStatus(a *Args, status, notePrefix string) {
+	need(a, 1, "set")
+	g := load(requireTree())
+	i := g.resolve(a.Pos[0])
+	n := g.Nodes[i]
+	if a.Bool("skip-check") {
+		humanOnly(a, "skip a check")
+	}
+	statusGuards(a, g, i, status)
+	checkNote := ""
+	if (status == "done" || status == "ready") && n.Check != "" {
+		if a.Bool("skip-check") {
+			checkNote = " (check skipped)"
+		} else {
+			before, check := n.Status, n.Check
+			ok, out := runCheck(g, n)
+			// a check can take minutes; anything written meanwhile (a decision,
+			// a note) must survive, so carry on from what is on disk now
+			g = load(g.Dir)
+			if n = g.Nodes[i]; n == nil {
+				die("%s was removed while its check ran", i)
 			}
+			if n.Status != before || n.Check != check {
+				die("%s changed while its check ran (now %s); run it again if it still applies", i, label(n.Status))
+			}
+			statusGuards(a, g, i, status) // e.g. a point added under it meanwhile
+			if !ok {
+				appendLog(n, "check failed, stays "+n.Status+": "+oneLine(lastLines(out, 3)), who(a))
+				g.mutate(n)
+				die("check failed for %s: %s\n%s", i, n.Check, lastLines(out, 15))
+			}
+			checkNote = " (check passed)"
 		}
 	}
 	old := n.Status
@@ -437,18 +471,11 @@ func cmdClaim(a *Args) {
 	need(a, 1, "claim")
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
-	f, n := g.Info[i], g.Nodes[i]
-	by := who(a) // an agent re-claiming its own node is fine
-	if f.State == "working" && n.Agent != "" && n.Agent != by && !a.Bool("force") {
-		die("%s is already claimed by %s (use --force to take it)", i, n.Agent)
-	}
-	if f.State == "waiting" && !a.Bool("force") {
-		die("%s is %s; pick something from `ct next`", i, f.Label)
-	}
-	if f.State == "proposed" {
+	if g.Nodes[i].Status == "proposed" { // even the human accepts first, so the step is recorded
 		die("%s is only proposed; a human has to `ct accept` it first", i)
 	}
-	setStatus(a, "working", "")
+	a.Pos[0] = i
+	setStatus(a, "working", "") // checks who holds it, waiting and dropped
 	warnOverlap(load(g.Dir), i, who(a))
 }
 
@@ -475,11 +502,32 @@ func cmdLink(a *Args) {
 		die("linking %s → %s would create a cycle", c, p)
 	}
 	n := g.Nodes[c]
+	changed := []*Node{n}
 	if !slices.Contains(n.Blocks, p) {
 		n.Blocks = append(n.Blocks, p)
 		appendLog(n, fmt.Sprintf("now blocks `%s`", p), who(a))
+		changed = append(changed, reopenFor(g, p, c, "linked", who(a))...)
 	}
-	g.mutate(n)
+	g.mutate(changed...)
+}
+
+// reopenFor reopens a finished parent that now waits on open work, so a
+// Done node never sits over unresolved points.
+func reopenFor(g *Graph, parent, child, why, by string) []*Node {
+	pn, cn := g.Nodes[parent], g.Nodes[child]
+	if pn == nil || cn == nil || resolved(cn.Status) || cn.Status == "proposed" {
+		return nil
+	}
+	if pn.Status != "done" && pn.Status != "ready" {
+		return nil
+	}
+	pn.Status = "open"
+	appendLog(pn, fmt.Sprintf("reopened: %s prerequisite `%s`", why, child), by)
+	out := []*Node{pn}
+	for _, gp := range pn.Blocks { // and so on up: what it blocks is not finished either
+		out = append(out, reopenFor(g, gp, parent, "reopened", by)...)
+	}
+	return out
 }
 
 func cmdUnlink(a *Args) {
@@ -512,6 +560,9 @@ func cmdRm(a *Args) {
 	if err := os.Remove(filepath.Join(g.Dir, "nodes", i+".md")); err != nil {
 		die("%v", err)
 	}
+	// its chat goes too, or a new node with the same id would inherit it
+	_ = os.Remove(chatPath(g.Dir, i))
+	_ = os.Remove(pendingPath(g.Dir, i))
 	g.mutate(changed...)
 	fmt.Println("removed", i)
 }
@@ -520,11 +571,10 @@ func cmdEdit(a *Args) {
 	need(a, 1, "edit")
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
+	parts := strings.Fields(os.Getenv("EDITOR"))
+	if len(parts) == 0 { // unset or blank
+		parts = []string{"vi"}
 	}
-	parts := strings.Fields(editor)
 	cmd := exec.Command(parts[0], append(parts[1:], filepath.Join(g.Dir, "nodes", i+".md"))...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	_ = cmd.Run()
@@ -637,7 +687,11 @@ func cmdNext(a *Args) {
 		ids = slices.DeleteFunc(ids, func(i string) bool { return !slices.Contains(g.headsOf(i), h) })
 	}
 	if s := a.Get("n", ""); s != "" {
-		if k, err := strconv.Atoi(s); err == nil && k < len(ids) {
+		k, err := strconv.Atoi(s)
+		if err != nil || k < 0 {
+			die("-n must be a number, 0 or more")
+		}
+		if k < len(ids) {
 			ids = ids[:k]
 		}
 	}
@@ -673,6 +727,7 @@ func main() {
 	name := os.Args[1]
 	for _, c := range commands {
 		if c.name == name {
+			lockWanted = lockedCommands[name]
 			c.run(parseArgs(name, os.Args[2:], c.flags))
 			return
 		}

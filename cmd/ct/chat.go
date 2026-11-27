@@ -26,7 +26,19 @@ func appendChat(tree, id, who, text string) {
 		die("%v", err)
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "@@ %s %s\n%s\n\n", who, now(), strings.TrimSpace(text))
+	fmt.Fprintf(f, "@@ %s %s\n%s\n\n", strings.ReplaceAll(flat(who), " ", "_"), now(), chatText(text))
+}
+
+// chatText keeps a message from starting a new one: "@@ " opens a message, so
+// a line of the text that begins with it is indented.
+func chatText(text string) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	for k, l := range lines {
+		if strings.HasPrefix(l, "@@") {
+			lines[k] = " " + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func readChat(tree, id string) string {
@@ -62,7 +74,8 @@ func cmdChat(a *Args) {
 	cmd.Env = helperEnv("CT_TREE="+tree, "CT_AGENT="+agent)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	var out []byte
+	err := runGroup(cmd, func() error { var e error; out, e = cmd.Output(); return e })
 	reply := strings.TrimSpace(string(out))
 	if err != nil {
 		reply = fmt.Sprintf("(agent failed: %v) %s\n%s", err, lastLines(stderr.String(), 5), reply)

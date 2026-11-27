@@ -67,6 +67,17 @@ func logWho(n *Node, contains string) string {
 	return who
 }
 
+// creator is who wrote the node's "created" log line: the first one that says
+// exactly that, not any later line that happens to contain the word.
+func creator(n *Node) string {
+	for _, l := range strings.Split(n.Body, "\n") {
+		if m := logLine.FindStringSubmatch(l); m != nil && strings.TrimSpace(m[2]) == "created" {
+			return m[1]
+		}
+	}
+	return ""
+}
+
 func isAgent(w string) bool { return w != "" && w != "human" && w != "ct sync" }
 
 // tell lets the agents involved with a node know what the human just did to it:
@@ -76,7 +87,7 @@ func tell(g *Graph, n *Node, actor, what string, wake bool) {
 		return
 	}
 	seen := map[string]bool{}
-	for _, t := range []string{n.Agent, logWho(n, "QUESTION:"), logWho(n, "created")} {
+	for _, t := range []string{n.Agent, logWho(n, "QUESTION:"), creator(n)} {
 		if !isAgent(t) || seen[t] {
 			continue
 		}
@@ -104,7 +115,10 @@ func cmdTalk(a *Args) {
 	body := fmt.Sprintf("[ct · %s · %s · %s]\n%s\n(context: ct show %s)", i, n.Title, g.Info[i].Label, text, i)
 	out, err := icSend(to, i, body, true)
 	if err != nil {
-		die("%s", strings.TrimPrefix(out, "ic: "))
+		if msg := strings.TrimPrefix(out, "ic: "); msg != "" {
+			die("%s", msg)
+		}
+		die("%v", err)
 	}
 	appendLog(n, fmt.Sprintf("talk → %s: %s", to, oneLine(text)), me)
 	g.mutate(n)
