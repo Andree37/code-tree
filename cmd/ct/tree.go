@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/sha1"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -103,27 +107,103 @@ func requireTree() string {
 	if t == "" {
 		die("no .tree/ found here or in any parent. Run `ct init` first.")
 	}
+	if abs, err := filepath.Abs(t); err == nil { // a relative CT_TREE must survive a change of folder
+		t = abs
+	}
+	if lockWanted {
+		lockTree(t)
+	}
 	return t
+}
+
+// ---------------------------------------------------------------- locking
+
+// Commands that change the tree hold an exclusive lock from load to save, so
+// two ct runs never overwrite each other's changes. The lock file lives
+// outside the tree, so it never shows up in the repo.
+var (
+	lockWanted bool     // set by main for commands that change the tree
+	lockFile   *os.File // held lock, if any
+)
+
+func lockPath(tree string) string {
+	sum := fmt.Sprintf("%x", sha1.Sum([]byte(tree)))
+	return filepath.Join(os.TempDir(), "ct-locks-"+strconv.Itoa(os.Getuid()), sum[:16]+".lock")
+}
+
+// lockTree takes the tree's lock (waiting for it) and returns a release
+// function. Taking it again while held does nothing.
+func lockTree(tree string) (release func()) {
+	if lockFile != nil {
+		return func() {}
+	}
+	p := lockPath(tree)
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		warnOnce(fmt.Sprintf("cannot lock the tree: %v", err))
+		return func() {}
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		warnOnce(fmt.Sprintf("cannot lock the tree: %v", err))
+		return func() {}
+	}
+	lockFile = f
+	return func() {
+		if lockFile == f {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+			lockFile = nil
+		}
+	}
+}
+
+// unlocked runs fn (a check, a model call) without holding the lock, so other
+// ct commands are not blocked for minutes, then takes the lock back. Callers
+// must reload the tree afterwards.
+func unlocked(fn func()) {
+	if lockFile == nil {
+		fn()
+		return
+	}
+	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX) }()
+	fn()
 }
 
 // ---------------------------------------------------------------- parse / dump
 
 func parseNode(text, path string) (*Node, error) {
+	text = strings.ReplaceAll(text, "\r\n", "\n") // files saved with Windows line endings
 	if !strings.HasPrefix(text, "---\n") {
 		return nil, fmt.Errorf("%s: missing frontmatter", path)
 	}
-	end := strings.Index(text[3:], "\n---\n")
-	if end < 0 {
-		return nil, fmt.Errorf("%s: unterminated frontmatter", path)
+	rest := text[4:]
+	var front, body string
+	switch {
+	case strings.HasPrefix(rest, "---\n"): // empty frontmatter
+		body = rest[4:]
+	case rest == "---":
+	default:
+		end := strings.Index(rest, "\n---\n")
+		switch {
+		case end >= 0:
+			front, body = rest[:end], rest[end+5:]
+		case strings.HasSuffix(rest, "\n---"):
+			front = rest[:len(rest)-4]
+		default:
+			return nil, fmt.Errorf("%s: unterminated frontmatter", path)
+		}
 	}
-	end += 3
 	n := &Node{
 		ID:     strings.TrimSuffix(filepath.Base(path), ".md"),
 		Status: "open",
 		Extra:  map[string]string{},
-		Body:   text[end+5:],
+		Body:   body,
 	}
-	for _, line := range strings.Split(text[4:end], "\n") {
+	fileID := n.ID // the file name is the id: saves go to <id>.md, so an id: line must not point elsewhere
+	for _, line := range strings.Split(front, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -132,7 +212,9 @@ func parseNode(text, path string) (*Node, error) {
 		str := v // checks and decisions keep their quotes
 		switch k {
 		case "id":
-			n.ID = str
+			if str != fileID {
+				warnOnce(fmt.Sprintf("%s: id %q differs from its file name; using %q", filepath.Base(path), str, fileID))
+			}
 		case "title":
 			n.Title = unquote(v) // older files wrote titles and outcomes as quoted strings
 		case "mode":
@@ -182,9 +264,52 @@ func parseNode(text, path string) (*Node, error) {
 }
 
 // unquote strips quotes left by older tree files (title: "x").
+// Only one whole quoted string is unquoted: `"a" and "b"` stays as it is.
 func unquote(v string) string {
+	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+		return v
+	}
+	inner := v[1 : len(v)-1]
+	for k := 0; k < len(inner); k++ {
+		if inner[k] == '\\' && k+1 < len(inner) {
+			k++
+		} else if inner[k] == '"' {
+			return v // an unescaped quote inside: not one quoted string
+		}
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(inner, `\"`, `"`), `\\`, `\`)
+}
+
+// quoteIfNeeded writes a title or outcome so unquote reads it back unchanged.
+func quoteIfNeeded(v string) string {
 	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
-		return strings.ReplaceAll(v[1:len(v)-1], `\"`, `"`)
+		return `"` + strings.ReplaceAll(strings.ReplaceAll(v, `\`, `\\`), `"`, `\"`) + `"`
+	}
+	return v
+}
+
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == 0x2028 || r == 0x2029
+}
+
+// flat makes a value safe for one frontmatter or log line: control characters
+// (newlines, escapes) become spaces, so no value can start a line of its own.
+func flat(s string) string {
+	if strings.IndexFunc(s, isControl) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// plainValue refuses a value with control characters where one line is required.
+func plainValue(what, v string) string {
+	if strings.IndexFunc(v, isControl) >= 0 {
+		die("%s must be one line of plain text (no newlines or control characters)", what)
 	}
 	return v
 }
@@ -209,32 +334,33 @@ func splitList(v string) []string {
 
 func dumpNode(n *Node) string {
 	vals := map[string]string{
-		"id": n.ID, "title": n.Title, "mode": n.Mode, "agent": n.Agent, "status": n.Status,
-		"blocks": strings.Join(n.Blocks, ", "), "outcome": n.Outcome, "created": n.Created, "updated": n.Updated,
+		"id": n.ID, "title": quoteIfNeeded(n.Title), "mode": n.Mode, "agent": n.Agent, "status": n.Status,
+		"blocks": strings.Join(n.Blocks, ", "), "outcome": quoteIfNeeded(n.Outcome), "created": n.Created, "updated": n.Updated,
 	}
 	var b strings.Builder
+	line := func(k, v string) { fmt.Fprintf(&b, "%s: %s\n", k, flat(v)) } // a value never spans lines
 	b.WriteString("---\n")
 	for _, k := range fieldOrder {
-		fmt.Fprintf(&b, "%s: %s\n", k, vals[k])
+		line(k, vals[k])
 	}
 	// code-sync fields only appear once used, so plain trees stay plain
 	if len(n.Touches) > 0 {
-		fmt.Fprintf(&b, "touches: %s\n", strings.Join(n.Touches, ", "))
+		line("touches", strings.Join(n.Touches, ", "))
 	}
 	if len(n.Stale) > 0 {
-		fmt.Fprintf(&b, "stale: %s\n", strings.Join(n.Stale, ", "))
+		line("stale", strings.Join(n.Stale, ", "))
 	}
 	if n.Check != "" {
-		fmt.Fprintf(&b, "check: %s\n", n.Check)
+		line("check", n.Check)
 	}
 	for _, d := range n.Decisions {
-		fmt.Fprintf(&b, "decision: %s\n", d)
+		line("decision", d)
 	}
 	if n.Base != "" {
-		fmt.Fprintf(&b, "base: %s\n", n.Base)
+		line("base", n.Base)
 	}
 	if n.At != "" {
-		fmt.Fprintf(&b, "at: %s\n", n.At)
+		line("at", n.At)
 	}
 	extra := make([]string, 0, len(n.Extra))
 	for k := range n.Extra {
@@ -242,7 +368,7 @@ func dumpNode(n *Node) string {
 	}
 	sort.Strings(extra)
 	for _, k := range extra {
-		fmt.Fprintf(&b, "%s: %s\n", k, n.Extra[k])
+		line(k, n.Extra[k])
 	}
 	b.WriteString("---\n")
 	b.WriteString(n.Body)
@@ -260,6 +386,10 @@ func load(dir string) *Graph {
 		if e.IsDir() || !strings.HasSuffix(name, ".md") || strings.HasPrefix(name, ".") {
 			continue // editor locks (.#x.md), macOS ._x.md, temp files
 		}
+		if !validID.MatchString(strings.TrimSuffix(name, ".md")) {
+			warnOnce(fmt.Sprintf("skipping %s: a node file name may only use letters, digits, '.', '_' and '-'", name))
+			continue
+		}
 		p := filepath.Join(dir, "nodes", name)
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -271,9 +401,7 @@ func load(dir string) *Graph {
 			warnOnce("skipping " + err.Error())
 			continue
 		}
-		if _, dup := g.Nodes[n.ID]; !dup {
-			g.IDs = append(g.IDs, n.ID)
-		}
+		g.IDs = append(g.IDs, n.ID) // the id is the file name, so never a duplicate
 		g.Nodes[n.ID] = n
 	}
 	g.compute()
@@ -307,10 +435,16 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-var warned = map[string]bool{}
+var (
+	warned   = map[string]bool{}
+	warnedMu sync.Mutex
+	validID  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+)
 
 // warnOnce reports a problem once per run without stopping ct.
 func warnOnce(msg string) {
+	warnedMu.Lock() // ct serve loads trees from several requests at once
+	defer warnedMu.Unlock()
 	if !warned[msg] {
 		warned[msg] = true
 		fmt.Fprintln(os.Stderr, "ct: "+msg)

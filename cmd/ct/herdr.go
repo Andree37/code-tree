@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -38,7 +39,8 @@ func cmdRun(a *Args) {
 		die("%s is %s; only open nodes get a new agent (or --force)", i, g.Info[i].Label)
 	}
 	agent := a.Get("agent", "claude")
-	args := []string{"tab", "create", "--cwd", loadConfig(g.Dir).Code, "--label", i, "--focus"}
+	code := loadConfig(g.Dir).Code
+	args := []string{"tab", "create", "--cwd", code, "--label", i, "--focus"}
 	if ws := os.Getenv("HERDR_WORKSPACE_ID"); ws != "" {
 		args = append(args, "--workspace", ws)
 	}
@@ -60,7 +62,12 @@ func cmdRun(a *Args) {
 	prompt := fmt.Sprintf("You own code-tree node `%s` (%s). Run `ct show %s`, then `ct claim %s`, and work on it "+
 		"following .tree/PROTOCOL.md. Ask the human with `ct ask` when you need a decision, and finish with "+
 		"`ct ready %s --outcome \"...\"`.", i, n.Title, i, i, i)
-	if err := exec.Command(bin, "pane", "run", pane, agent+" "+shellQuote(prompt)).Run(); err != nil {
+	line := agent + " " + shellQuote(prompt)
+	// the new agent works in the code repo; a tree kept elsewhere must be named for it
+	if rel, err := filepath.Rel(code, g.Dir); err != nil || rel != treeDir {
+		line = "CT_TREE=" + shellQuote(g.Dir) + " " + line
+	}
+	if err := exec.Command(bin, "pane", "run", pane, line).Run(); err != nil {
 		die("could not start %s in %s: %v", agent, pane, err)
 	}
 	appendLog(n, fmt.Sprintf("new %s agent started in herdr pane %s", agent, pane), who(a))

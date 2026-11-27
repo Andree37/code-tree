@@ -19,7 +19,16 @@ func TestMain(m *testing.M) {
 		main()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// tests must never message real sessions: a stub ic shadows the real one
+	stub, err := os.MkdirTemp("", "ct-test-bin-")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.WriteFile(filepath.Join(stub, "ic"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	os.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+	code := m.Run()
+	os.RemoveAll(stub)
+	os.Exit(code)
 }
 
 // ct runs the CLI in dir with extra environment, returning output and success.

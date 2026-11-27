@@ -4,15 +4,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
 func cmdAccept(a *Args) {
 	need(a, 1, "accept")
+	humanOnly(a, "accept a proposal")
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
 	n := g.Nodes[i]
@@ -27,11 +30,7 @@ func cmdAccept(a *Args) {
 	appendLog(n, msg, who(a))
 	changed := []*Node{n}
 	for _, p := range g.Info[i].Parents { // now it is real work: what it blocks is open again
-		if pn := g.Nodes[p]; pn.Status == "done" || pn.Status == "ready" {
-			pn.Status = "open"
-			appendLog(pn, fmt.Sprintf("reopened: accepted prerequisite `%s`", i), who(a))
-			changed = append(changed, pn)
-		}
+		changed = append(changed, reopenFor(g, p, i, "accepted", who(a))...)
 	}
 	g.mutate(changed...)
 	fmt.Printf("%s: Open\n", i)
@@ -40,6 +39,7 @@ func cmdAccept(a *Args) {
 
 func cmdReject(a *Args) {
 	need(a, 1, "reject")
+	humanOnly(a, "reject a proposal")
 	g := load(requireTree())
 	i := g.resolve(a.Pos[0])
 	n := g.Nodes[i]
@@ -59,6 +59,7 @@ func cmdReject(a *Args) {
 
 func cmdMerge(a *Args) {
 	need(a, 2, "merge")
+	humanOnly(a, "merge nodes")
 	g := load(requireTree())
 	i, into := g.resolve(a.Pos[0]), g.resolve(a.Pos[1])
 	if i == into {
@@ -76,7 +77,15 @@ func cmdMerge(a *Args) {
 	appendLog(t, note, who(a))
 	t.Touches = append(t.Touches, n.Touches...)
 	addTouches(t, nil)
+	n.Touches = nil // the target owns these files now; a dropped node must not go stale over them
 	changed := []*Node{t, n}
+	add := func(ns ...*Node) {
+		for _, x := range ns {
+			if !slices.Contains(changed, x) {
+				changed = append(changed, x)
+			}
+		}
+	}
 	for _, c := range g.Info[i].Children { // children now block the target, once
 		cn := g.Nodes[c]
 		var blocks []string
@@ -89,7 +98,13 @@ func cmdMerge(a *Args) {
 			}
 		}
 		cn.Blocks = blocks
-		changed = append(changed, cn)
+		for _, d := range n.Decisions { // what was decided for the merged node still binds them
+			if !slices.Contains(cn.Decisions, d) {
+				cn.Decisions = append(cn.Decisions, d)
+			}
+		}
+		add(cn)
+		add(reopenFor(g, into, c, "merged-in", who(a))...)
 	}
 	// what waited on the merged node now waits on the target, so nothing above
 	// it can be finished while the merged work is still open
@@ -97,6 +112,7 @@ func cmdMerge(a *Args) {
 	for _, p := range g.Info[i].Parents {
 		if p != into && !under[p] && !slices.Contains(t.Blocks, p) {
 			t.Blocks = append(t.Blocks, p)
+			add(reopenFor(g, p, into, "merged-in", who(a))...)
 		}
 	}
 	n.Status = "dropped"
@@ -118,13 +134,35 @@ func section(body, heading string) string {
 }
 
 // runCheck runs a node's check in the code repo and returns (passed, output).
-func runCheck(g *Graph, n *Node) (bool, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", n.Check)
-	cmd.Dir = loadConfig(g.Dir).Code
-	out, err := cmd.CombinedOutput()
-	return err == nil, string(out)
+// The tree lock is let go meanwhile: a check can take minutes.
+func runCheck(g *Graph, n *Node) (ok bool, output string) {
+	unlocked(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", n.Check)
+		cmd.Dir = loadConfig(g.Dir).Code
+		var out []byte
+		err := runGroup(cmd, func() error { var e error; out, e = cmd.CombinedOutput(); return e })
+		ok, output = err == nil, string(out)
+	})
+	return ok, output
+}
+
+// runGroup runs cmd in its own process group so that a timeout kills
+// everything it started, and a background process it leaves behind (a dev
+// server, a hung test) can neither keep ct waiting nor outlive it.
+func runGroup(cmd *exec.Cmd, run func() error) error {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 3 * time.Second // after the command exits, stop waiting for its leftovers' output
+	err := run()
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // whatever it left running
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil // it exited successfully; only a leftover held the output open
+	}
+	return err
 }
 
 func lastLines(s string, k int) string {
@@ -168,6 +206,7 @@ func cmdCheck(a *Args) {
 }
 
 // runStaleChecks re-runs checks of stale nodes: pass clears stale, fail reopens.
+// Each result is saved as soon as it is known, applied to what is on disk then.
 func runStaleChecks(g *Graph, head string) []*Node {
 	var changed []*Node
 	for _, i := range g.IDs {
@@ -175,10 +214,11 @@ func runStaleChecks(g *Graph, head string) []*Node {
 		if len(n.Stale) == 0 || n.Check == "" || n.Status == "dropped" { // dropped work is never reopened
 			continue
 		}
+		check := n.Check
 		ok, out := runCheck(g, n)
 		// the check may have taken minutes: apply the result to what is on disk now
 		fresh := load(g.Dir)
-		if n = fresh.Nodes[i]; n == nil || len(n.Stale) == 0 || n.Status == "dropped" {
+		if n = fresh.Nodes[i]; n == nil || len(n.Stale) == 0 || n.Status == "dropped" || n.Check != check {
 			continue
 		}
 		g.Nodes[i] = n
@@ -191,6 +231,7 @@ func runStaleChecks(g *Graph, head string) []*Node {
 			n.Status, n.Stale = "open", nil
 			fmt.Printf("  check FAILED %s, reopened\n", i)
 		}
+		fresh.save(n) // now, before the next check lets go of the lock
 		changed = append(changed, n)
 	}
 	return changed

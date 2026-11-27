@@ -307,6 +307,9 @@ func cmdTouch(a *Args) {
 }
 
 func recordCodeTouches(g *Graph, n *Node, ts []string) {
+	for _, t := range ts {
+		plainValue("a touched path", t)
+	}
 	if slices.Contains(ts, "auto") {
 		cfg := loadConfig(g.Dir)
 		var auto []string
@@ -366,10 +369,7 @@ func cmdSync(a *Args) {
 
 	report := func(changedNodes int) {
 		if a.Bool("run-checks") && !dry {
-			if ch := runStaleChecks(g, head); len(ch) > 0 {
-				for _, n := range ch {
-					g.save(n)
-				}
+			if ch := runStaleChecks(g, head); len(ch) > 0 { // each result is saved as it comes
 				writeGraphMD(dir)
 			}
 		}
