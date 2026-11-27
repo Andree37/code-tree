@@ -687,6 +687,9 @@ func cmdTurn(a *Args) {
 		var landed, tree string
 		if strings.TrimSpace(t.reply) != "" { // a turn with no answer (a tool command) is skipped
 			rel := packageOf(root, t.files, pkg)
+			if tagged, ok := taggedPackage(t.prompt, root); ok {
+				rel = tagged // the human pressed t or g on a box in that package's graph
+			}
 			tree = pkgTree(root, rel)
 			g := load(tree)
 			out, err := classify(classifyPrompt(g, pkgName(root, rel), t), cwd)
@@ -710,14 +713,62 @@ func cmdTurn(a *Args) {
 	}
 }
 
-var pointer = regexp.MustCompile(`\[code-tree · [^·\]]+ · ([a-z0-9-]+)`)
+// The graph pane tags t and g messages "[code-tree · <package> · <id> · <title>]"
+// or "[code-tree · <package> · <id>] ...". The package is a folder name and may
+// hold "]" or " · " itself, so every " · <id>" in the tag line is a candidate
+// split; the caller says which split is real (a node or package that exists).
+var tagID = regexp.MustCompile(`^[a-z0-9-]+(?: · |\])`)
+
+// tagSplits lists the (package, id) readings of the tag in prompt, first to last.
+func tagSplits(prompt string) [][2]string {
+	const open = "[code-tree · "
+	k := strings.Index(prompt, open)
+	if k < 0 {
+		return nil
+	}
+	line, _, _ := strings.Cut(prompt[k+len(open):], "\n")
+	var out [][2]string
+	for at := 0; ; {
+		j := strings.Index(line[at:], " · ")
+		if j < 0 {
+			return out
+		}
+		j += at
+		if j > 0 {
+			if m := tagID.FindString(line[j+len(" · "):]); m != "" {
+				id := strings.TrimSuffix(strings.TrimSuffix(m, " · "), "]")
+				out = append(out, [2]string{line[:j], id})
+			}
+		}
+		at = j + len(" · ")
+	}
+}
 
 // pointedAt is the box a message sent from the graph pane (t or g) was about.
 func pointedAt(prompt string, g *Graph) string {
-	if m := pointer.FindStringSubmatch(prompt); m != nil && g.Nodes[m[1]] != nil && g.Info[m[1]].Kind != "head" {
-		return m[1]
+	for _, s := range tagSplits(prompt) {
+		if g.Nodes[s[1]] != nil && g.Info[s[1]].Kind != "head" {
+			return s[1]
+		}
 	}
 	return ""
+}
+
+// taggedPackage is the package a graph pane message names, as one of this
+// repo's known packages (its rel path); false when there is no tag or no such package.
+func taggedPackage(prompt, root string) (string, bool) {
+	splits := tagSplits(prompt)
+	if len(splits) == 0 {
+		return "", false
+	}
+	for _, rel := range repoPackages(root) {
+		for _, s := range splits {
+			if pkgName(root, rel) == s[0] {
+				return rel, true
+			}
+		}
+	}
+	return "", false
 }
 
 // updateConvo changes a session's state from a fresh read, so the hooks and

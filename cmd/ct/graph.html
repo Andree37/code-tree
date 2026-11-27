@@ -134,7 +134,7 @@ async function refresh() {
   try {
     const t = await (await fetch("graph.txt", { cache: "no-store" })).text();
     if (t.slice(t.indexOf("\n")) !== RAW.slice(RAW.indexOf("\n"))) { RAW = t; DATA = parse(t); render(); }
-  } catch {}
+  } catch (e) { console.error(e); }
 }
 
 async function act(action, id, text = "") {
@@ -198,7 +198,7 @@ const RES = new Set(["done", "dropped"]);
 
 function subgraph(head, idx) {
   const seen = new Set([head]), st = [head];
-  while (st.length) for (const c of idx[st.pop()].waits_on) if (!seen.has(c)) { seen.add(c); st.push(c); }
+  while (st.length) for (const c of idx[st.pop()]?.waits_on ?? []) if (idx[c] && !seen.has(c)) { seen.add(c); st.push(c); }
   return seen;
 }
 
@@ -215,14 +215,18 @@ function layout(head, idx) {
       if (!--indeg[c]) q.push(c);
     }
   }
+  // nodes in a cycle (a waits on b waits on a) never reach indegree 0: put them below the rest
+  const deepest = Math.max(0, ...Object.values(depth));
+  ids.forEach((i) => (depth[i] ??= deepest + 1));
   const layers = [];
   ids.forEach((i) => (layers[depth[i]] ??= []).push(i));
+  for (let d = 0; d < layers.length; d++) layers[d] ??= [];
   const order = {};
   layers.forEach((L, d) => {
     L.sort((a, b) => bary(a) - bary(b) || idx[a].created.localeCompare(idx[b].created) || a.localeCompare(b));
     L.forEach((i, k) => (order[i] = k));
     function bary(i) {
-      const ps = idx[i].blocks.filter((p) => ids.has(p) && depth[p] < d);
+      const ps = idx[i].blocks.filter((p) => ids.has(p) && depth[p] < d && order[p] !== undefined);
       if (!ps.length) return 0;
       return ps.reduce((s, p) => s + order[p] - (layers[depth[p]].length - 1) / 2 + idx[p].waits_on.indexOf(i) / 100, 0) / ps.length;
     }
@@ -375,19 +379,22 @@ const apply = () => (stage.style.transform = `translate(${view.x}px,${view.y}px)
 function open(i, keep) {
   const idx = byId(), n = idx[i];
   // keep anything typed when the panel redraws for the same node
-  const drafts = selected === i ? [...side.querySelectorAll("textarea")].map((t) => t.value) : [];
+  const tas = selected === i ? [...side.querySelectorAll("textarea")] : [];
+  const drafts = tas.map((t) => t.value);
+  const focus = tas.indexOf(document.activeElement);
+  const caret = focus >= 0 ? [tas[focus].selectionStart, tas[focus].selectionEnd, tas[focus].scrollTop] : null;
   if (!n) { side.classList.remove("open"); selected = null; return; }
   selected = i;
   if (!keep && n.heads.length && !n.heads.includes(sel.value)) {
     sel.value = n.heads[0]; store.set("ct.head", n.heads[0]); fitted = false;
   }
   if (!keep) stage.querySelectorAll(".node").forEach((e) => e.classList.remove("sel")), render();
-  const link = (id) => `<a data-id="${id}">${esc(idx[id]?.title ?? id)}</a> <span class="chip">${esc(idx[id]?.label ?? "")}</span>`;
+  const link = (id) => `<a data-id="${esc(id)}">${esc(idx[id]?.title ?? id)}</a> <span class="chip">${esc(idx[id]?.label ?? "")}</span>`;
   side.innerHTML = `
     <button id="close" style="float:right">✕</button>
-    <span class="kind">${n.kind.toUpperCase()}</span>
+    <span class="kind">${esc(String(n.kind).toUpperCase())}</span>
     <h2>${esc(n.title)}</h2>
-    <div class="meta"><span class="chip">${esc(n.label)}</span> · <code>${esc(n.id)}</code>${n.unblocks ? ` · unblocks ${n.unblocks}` : ""}
+    <div class="meta"><span class="chip">${esc(n.label)}</span> · <code>${esc(n.id)}</code>${n.unblocks ? ` · unblocks ${esc(n.unblocks)}` : ""}
       ${n.mode || n.agent ? `<br>${esc([n.mode, n.agent].filter(Boolean).join(" · "))}` : ""}</div>
     ${n.outcome ? `<p><b>Outcome:</b> ${esc(n.outcome)}</p>` : ""}
     ${n.stale.length ? `<p style="color:var(--bad)"><b>Stale:</b> code changed since this was resolved: ${n.stale.map((p) => `<code>${esc(p)}</code>`).join(", ")}<br><code>ct ack ${esc(n.id)}</code> if it still holds, or reopen it.</p>` : ""}
@@ -416,10 +423,14 @@ function open(i, keep) {
     };
     loadChat(i);
   }
-  side.querySelectorAll("textarea").forEach((t, k) => { if (drafts[k]) t.value = drafts[k]; });
+  side.querySelectorAll("textarea").forEach((t, k) => {
+    if (drafts[k]) t.value = drafts[k];
+    if (k === focus) { t.focus(); t.setSelectionRange(caret[0], caret[1]); t.scrollTop = caret[2]; }
+  });
   side.querySelector("#close").onclick = () => { selected = null; side.classList.remove("open"); render(); };
   side.querySelectorAll("a[data-id]").forEach((a) => (a.onclick = () => {
-    const t = a.dataset.id, h = idx[t].heads.includes(sel.value) ? sel.value : idx[t].heads[0];
+    const t = a.dataset.id; if (!idx[t]) return;
+    const h = idx[t].heads.includes(sel.value) ? sel.value : idx[t].heads[0];
     if (h !== sel.value) { sel.value = h; store.set("ct.head", h); fitted = false; }
     open(t);
   }));
@@ -433,7 +444,7 @@ function decisionsHTML(i, idx) {
   }
   return out.length ? `<b>Decisions in force</b><ul>${out.join("")}</ul>` : "";
 }
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 sel.onchange = () => { store.set("ct.head", sel.value); fitted = false; selected = null; side.classList.remove("open"); render(); };
 $("#fit").onclick = () => fit();
@@ -453,7 +464,12 @@ document.querySelectorAll("nav button").forEach((b) => (b.onclick = () => {
 }));
 tab = store.get("ct.tab") || "graph";
 $("#list").onclick = () => { if (selected) { selected = null; side.classList.remove("open"); } };
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") wrap.onclick(); if (e.key === "f") fit(); });
+document.addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (e.isComposing || (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.tagName === "SELECT" || t.isContentEditable))) return;
+  if (e.key === "Escape") wrap.onclick();
+  if (e.key === "f" && !e.metaKey && !e.ctrlKey && !e.altKey) fit();
+});
 
 render();
 if (location.hash.length > 1) { const id = decodeURIComponent(location.hash.slice(1)); if (byId()[id]) open(id); }

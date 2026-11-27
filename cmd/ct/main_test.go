@@ -12,9 +12,12 @@ import (
 // behaves exactly like `ct`.
 func TestMain(m *testing.M) {
 	if os.Getenv("CT_TEST_MAIN") == "1" {
+		own := os.Args[1:] // started by runSelf (os.Executable): its own argv is the command
 		os.Args = append([]string{"ct"}, strings.Fields(os.Getenv("CT_TEST_ARGS"))...)
 		if raw := os.Getenv("CT_TEST_ARGV"); raw != "" { // exact argv, tab separated
 			os.Args = append([]string{"ct"}, strings.Split(raw, "\t")...)
+		} else if os.Getenv("CT_TEST_ARGS") == "" && len(own) > 0 && !strings.HasPrefix(own[0], "-test.") {
+			os.Args = append([]string{"ct"}, own...)
 		}
 		main()
 		os.Exit(0)

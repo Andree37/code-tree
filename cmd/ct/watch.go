@@ -13,7 +13,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -78,7 +77,7 @@ func cmdWatch(a *Args) {
 		}
 	}()
 	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigs, paneSignals...)
 	tick := time.NewTicker(800 * time.Millisecond)
 	defer tick.Stop()
 
@@ -377,16 +376,11 @@ func (w *watcher) ask(prompt string, then func(string)) {
 	}
 }
 
-// act runs a quick ct command as the human and shows its result.
+// act runs a ct command as the human and shows its result. It runs in the
+// background like bg: done, accept and ready can run a node's check, which may
+// take minutes, and the pane must keep drawing and answering keys meanwhile.
 func (w *watcher) act(action, id, text string) {
-	args, ok := actionArgs(action, id, text)
-	if !ok {
-		w.msg = "can't " + action + " without text"
-		return
-	}
-	out, _ := runSelf(w.tree, args)
-	w.msg = lastLines(out, 1)
-	w.reload()
+	w.bg(action, id, text)
 }
 
 // bg runs a slower ct command (talking, starting agents) without freezing the view.
@@ -434,20 +428,28 @@ func helpLines() []string {
 
 // ---------------------------------------------------------------- drawing
 
-func visible(s string) int { return utf8.RuneCountInString(s) }
+// visible is how many columns s takes (wide characters count twice).
+func visible(s string) int { return textWidth(s) }
 
+// cut keeps s within n columns, ending in … when it had to shorten it.
 func cut(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) > n {
-		if n == 1 {
-			return "…"
-		}
-		return string(r[:n-1]) + "…"
+	if textWidth(s) <= n {
+		return s
 	}
-	return s
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		w := runeWidth(r)
+		if used+w > n-1 {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String() + "…"
 }
 
 func stateColor(state string) string {
@@ -562,7 +564,7 @@ func (w *watcher) flush(lines []string) {
 	if len(lines) > w.h {
 		lines = lines[:w.h]
 	}
-	fmt.Print("\x1b[H\x1b[2J" + strings.Join(lines, "\r\n"))
+	fmt.Print("\x1b[H\x1b[2J" + safeLines(lines))
 }
 
 func (w *watcher) detail() []string {

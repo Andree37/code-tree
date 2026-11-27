@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 const (
@@ -58,6 +59,7 @@ type seer struct {
 	pickSel  int       // which package is highlighted in it
 	pickRows []pkgInfo // what the list shows
 	lastSeen string
+	ended    bool // the Claude in this tab has exited
 }
 
 func cmdSee(a *Args) {
@@ -97,7 +99,7 @@ func cmdSee(a *Args) {
 		}
 	}()
 	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigs, paneSignals...)
 	tick := time.NewTicker(800 * time.Millisecond)
 	defer tick.Stop()
 
@@ -152,18 +154,39 @@ func pickSession(want string) string {
 		return ""
 	}
 	if tab := os.Getenv("HERDR_TAB_ID"); tab != "" {
-		best, seen := "", ""
-		icEntries, _ := os.ReadDir(filepath.Join(icHome(), "sessions"))
-		for _, e := range icEntries {
-			kv := icSession(e.Name())
-			if kv["tab"] == tab && kv["kind"] == "claude" && kv["ended"] == "" && kv["seen"] > seen {
-				best, seen = kv["id"], kv["seen"]
-			}
-		}
-		if best != "" {
-			return best
+		if id, _ := tabSession(tab); id != "" {
+			return id
 		}
 	}
+	return latestSession(ids)
+}
+
+// tabSession is the Claude session in a herdr tab: the live one seen last, or,
+// when none is live, the one that ended last (ended is then true). Inside herdr
+// the pane only ever follows its own tab, never another tab's Claude.
+func tabSession(tab string) (id string, ended bool) {
+	live, liveSeen, gone, goneSeen := "", "", "", ""
+	icEntries, _ := os.ReadDir(filepath.Join(icHome(), "sessions"))
+	for _, e := range icEntries {
+		kv := icSession(e.Name())
+		if kv["tab"] != tab || kv["kind"] != "claude" {
+			continue
+		}
+		if kv["ended"] == "" && kv["seen"] > liveSeen {
+			live, liveSeen = kv["id"], kv["seen"]
+		}
+		if kv["ended"] != "" && kv["seen"] > goneSeen {
+			gone, goneSeen = kv["id"], kv["seen"]
+		}
+	}
+	if live != "" {
+		return live, false
+	}
+	return gone, gone != ""
+}
+
+// latestSession is the session whose tree changed last.
+func latestSession(ids []string) string {
 	best, when := "", ""
 	for _, id := range ids {
 		if u := readConvo(id)["updated"]; u > when {
@@ -185,7 +208,8 @@ func (s *seer) size() {
 func (s *seer) signature() string {
 	var b strings.Builder
 	if s.auto {
-		b.WriteString(pickSession("") + ";") // a new session in this tab
+		id, ended := s.follow()
+		fmt.Fprintf(&b, "%s%v;", id, ended) // a new session in this tab, or its Claude ended
 	}
 	if info, err := os.Stat(filepath.Join(sessionDir(s.session), "convo")); err == nil {
 		fmt.Fprintf(&b, "%d;", info.ModTime().UnixNano())
@@ -198,11 +222,27 @@ func (s *seer) signature() string {
 	return b.String()
 }
 
+// follow is the session the pane should show now. Inside herdr that is this
+// tab's Claude, even after it ended (so t and g never reach another tab's
+// Claude); outside herdr, the session whose tree changed last.
+func (s *seer) follow() (id string, ended bool) {
+	if tab := os.Getenv("HERDR_TAB_ID"); tab != "" {
+		id, ended = tabSession(tab)
+		if id == "" { // no Claude in this tab yet: stay on what the pane started with
+			return s.session, false
+		}
+		return id, ended
+	}
+	return pickSession(""), false
+}
+
 func (s *seer) reload() {
 	if s.auto { // after /clear or /resume the tab runs a new session: follow it
-		if id := pickSession(""); id != "" && id != s.session {
+		id, ended := s.follow()
+		if id != "" && id != s.session {
 			s.session, s.head, s.sel, s.lastSeen = id, "", "", ""
 		}
+		s.ended = ended
 	}
 	s.sig = s.signature()
 	s.st = readConvo(s.session)
@@ -301,14 +341,28 @@ func (s *seer) layout() {
 }
 
 func (s *seer) put(x, y int, r rune, color string) {
+	if r != 0 && unicode.IsControl(r) {
+		r = ' '
+	}
 	if y >= 0 && y < len(s.canvas) && x >= 0 && x < len(s.canvas[y]) {
 		s.canvas[y][x] = cell{r, color}
 	}
 }
 
+// text writes str from column x. A wide character takes two cells: itself and
+// a 0 placeholder that render skips; zero-width characters are left out.
 func (s *seer) text(x, y int, str, color string) {
-	for i, r := range []rune(str) {
-		s.put(x+i, y, r, color)
+	for _, r := range str {
+		switch runeWidth(r) {
+		case 0:
+		case 2:
+			s.put(x, y, r, color)
+			s.put(x+1, y, 0, color)
+			x += 2
+		default:
+			s.put(x, y, r, color)
+			x++
+		}
 	}
 }
 
@@ -475,6 +529,9 @@ func (s *seer) render() {
 	if s.st["busy"] != "" {
 		state = "Claude is working…"
 	}
+	if s.ended {
+		state = "Claude in this tab has ended"
+	}
 	head := fmt.Sprintf(" What you and Claude discussed in %s/", pkgName(s.root, s.pkg))
 	right := state
 	pad := s.w - visible(head) - visible(right) - 1
@@ -494,7 +551,7 @@ func (s *seer) render() {
 		return
 	}
 
-	graphH := s.h - len(out) - 6
+	graphH := max(0, s.h-len(out)-6) // a tiny pane shows no graph rather than crash
 	graphW := s.w
 	var panel []string
 	if s.pickOn { // the package list takes the left side; the graph keeps the rest
@@ -544,7 +601,13 @@ func (s *seer) render() {
 					b.WriteString(cReset + c.color)
 					last = c.color
 				}
-				b.WriteRune(c.r)
+				switch {
+				case c.r == 0 && col > 0: // right half of the wide character just written
+				case c.r == 0, runeWidth(c.r) == 2 && col == graphW-1: // half of it is off screen
+					b.WriteByte(' ')
+				default:
+					b.WriteRune(c.r)
+				}
 			}
 			rows = append(rows, b.String()+cReset)
 		}
@@ -584,7 +647,12 @@ func (s *seer) render() {
 	if s.inputOn {
 		add(cOrange, " "+s.prompt+" › "+string(s.input)+"▏")
 	} else {
-		add(cDim, " arrows: pick a box · enter: read it · t: ask Claude about it · g: tell Claude to go back to it · p: folders · ?: help · q: close   "+s.msg)
+		help := "arrows: pick a box · enter: read it · t: ask Claude about it · g: tell Claude to go back to it · p: folders · ?: help · q: close"
+		if s.msg != "" { // the message first: the help line is wider than most panes
+			add("", " "+s.msg+cDim+"   "+help)
+		} else {
+			add(cDim, " "+help)
+		}
 	}
 	s.flush(out)
 }
@@ -593,7 +661,7 @@ func (s *seer) flush(lines []string) {
 	if len(lines) > s.h {
 		lines = lines[:s.h]
 	}
-	fmt.Print("\x1b[H\x1b[2J" + strings.Join(lines, "\r\n"))
+	fmt.Print("\x1b[H\x1b[2J" + safeLines(lines))
 }
 
 // ---------------------------------------------------------------- keys
@@ -636,9 +704,9 @@ func (s *seer) key(k string) bool {
 		case "\x1b[A", "k":
 			s.pickSel = max(0, s.pickSel-1)
 		case "\x1b[B", "j":
-			s.pickSel = min(len(s.pickRows)-1, s.pickSel+1)
+			s.pickSel = max(0, min(len(s.pickRows)-1, s.pickSel+1))
 		case "\r", "\n":
-			if s.pickSel < len(s.pickRows) {
+			if s.pickSel >= 0 && s.pickSel < len(s.pickRows) {
 				p := s.pickRows[s.pickSel]
 				// picking Claude's own package means: follow Claude again
 				s.pkg, s.pinned, s.head, s.sel = p.rel, !p.current, "", ""
@@ -807,15 +875,20 @@ func (s *seer) send(text string) {
 		s.msg = "needs intercom: " + icInstall
 		return
 	}
+	if s.ended {
+		s.msg = "the Claude in this tab has ended: start it again to talk to it"
+		return
+	}
 	s.msg = "sending…"
+	session, results := s.session, s.results // read here: reload may change s.session meanwhile
 	children.Add(1)
 	go func() {
 		defer children.Done()
-		cmd := exec.Command(bin, "send", "--topic", "code-tree", "--", s.session, text)
+		cmd := exec.Command(bin, "send", "--topic", "code-tree", "--", session, text)
 		cmd.Env = append(os.Environ(), "IC_ID=", "CLAUDECODE=")
 		out, _ := cmd.CombinedOutput()
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		report(s.results, strings.TrimPrefix(lines[len(lines)-1], "ic: "))
+		report(results, strings.TrimPrefix(lines[len(lines)-1], "ic: "))
 	}()
 }
 
@@ -829,8 +902,12 @@ func (s *seer) browser() {
 	if err != nil {
 		return
 	}
+	tree := s.tree
+	if abs, err := filepath.Abs(tree); err == nil {
+		tree = abs
+	}
 	cmd := exec.Command(exe, "serve", "--port", "0")
-	cmd.Env = append(os.Environ(), "CT_TREE="+s.tree)
+	cmd.Env = append(os.Environ(), "CT_TREE="+tree)
 	if err := cmd.Start(); err != nil {
 		s.msg = err.Error()
 		return
@@ -943,6 +1020,9 @@ func ago(t time.Time) string {
 
 // pickerLines draws the package list, pw wide and h tall.
 func (s *seer) pickerLines(pw, h int) []string {
+	if h <= 0 {
+		return nil
+	}
 	pad := func(color, text string) string {
 		text = cut(text, pw)
 		return color + text + strings.Repeat(" ", max(0, pw-visible(text))) + cReset
@@ -992,6 +1072,8 @@ func (s *seer) pickerLines(pw, h int) []string {
 
 // toggleWaiting lets the human overrule the model: a box that is not really
 // waiting on them becomes settled, and pressing again puts it back.
+const settledNote = "you marked it settled: it was not waiting on you (it said: "
+
 func (s *seer) toggleWaiting() {
 	g := load(s.tree)
 	n := g.Nodes[s.sel]
@@ -1000,11 +1082,15 @@ func (s *seer) toggleWaiting() {
 	}
 	switch n.Status {
 	case "needs-you":
-		appendLog(n, "you marked it settled: it was not waiting on you (it said: "+n.Outcome+")", "human")
+		appendLog(n, settledNote+oneLine(n.Outcome)+")", "human")
 		n.Status, n.Outcome = "ready", "You marked this settled."
 		s.msg = "marked settled"
 	case "done", "ready":
 		n.Status = "needs-you"
+		if n.Outcome == "You marked this settled." && strings.Contains(n.Body, settledNote) {
+			q := lastLogText(n, settledNote)
+			n.Outcome = strings.TrimSuffix(q, ")") // undo: the question it was waiting on comes back
+		}
 		appendLog(n, "you marked it as waiting for you again", "human")
 		s.msg = "marked waiting for you"
 	default:

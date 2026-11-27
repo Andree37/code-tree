@@ -14,8 +14,10 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -229,7 +231,35 @@ func (pi *paneInput) handle(events []inputEvent, key func(string) bool, paste fu
 // read hands one terminal read to the pane.
 func (pi *paneInput) read(b []byte, key func(string) bool, paste func(string)) bool {
 	pi.wait.Stop()
-	return pi.handle(pi.p.push(b), key, paste)
+	return pi.handle(unbracketed(pi.p.push(b)), key, paste)
+}
+
+// unbracketed catches a paste from a terminal without bracketed paste: a burst
+// of unbracketedMin or more characters with a line break, all in one read, is
+// not someone typing hotkeys (d drops a node), so it becomes one paste instead
+// of keys. Shorter bursts stay keys: fast typing can put "ok", Enter and the
+// next key in one read, and that Enter must still send.
+const unbracketedMin = 8
+
+func unbracketed(events []inputEvent) []inputEvent {
+	if len(events) < unbracketedMin {
+		return events
+	}
+	var text strings.Builder
+	newline := false
+	for _, ev := range events {
+		if ev.isPaste || strings.HasPrefix(ev.key, "\x1b") || ev.key == "\x03" {
+			return events // a real paste, an arrow or ctrl-c: these are keys
+		}
+		if ev.key == "\r" || ev.key == "\n" {
+			newline = true
+		}
+		text.WriteString(ev.key)
+	}
+	if !newline {
+		return events
+	}
+	return []inputEvent{{paste: text.String(), isPaste: true}}
 }
 
 // settle is called when the wait timer fires.
@@ -253,13 +283,100 @@ func waitChildren(limit time.Duration) {
 // cleanGraph strips terminal control characters from everything a pane shows
 // that someone else wrote (titles, outcomes, logs, names), so an agent's text
 // can never steer the terminal (set the clipboard, rewrite the screen).
+// Whole lines are cleaned again by termSafe when drawn, which also covers ids.
 func cleanGraph(g *Graph) {
 	for _, n := range g.Nodes {
 		n.Title, n.Outcome, n.Agent, n.Body = clean(n.Title), clean(n.Outcome), clean(n.Agent), clean(n.Body)
-		for i := range n.Decisions {
-			n.Decisions[i] = clean(n.Decisions[i])
+		n.Mode, n.Check, n.Status = clean(n.Mode), clean(n.Check), clean(n.Status)
+		for _, list := range [][]string{n.Decisions, n.Touches, n.Stale} {
+			for i := range list {
+				list[i] = clean(list[i])
+			}
 		}
 	}
+	for _, f := range g.Info {
+		f.Label = clean(f.Label)
+	}
+}
+
+// termSafe makes one drawn line safe for the terminal: the colour codes the
+// pane itself writes (ESC [ digits ; m) stay, every other escape sequence and
+// control character goes. Everything a pane prints passes through it, so text
+// from a node file (an id, a check's output, a touched path) can never set the
+// clipboard, retitle the window or move the cursor.
+func termSafe(line string) string {
+	var b strings.Builder
+	for i := 0; i < len(line); {
+		c := line[i]
+		if c == 0x1b && i+1 < len(line) && line[i+1] == '[' {
+			j := i + 2
+			for j < len(line) && (line[j] == ';' || (line[j] >= '0' && line[j] <= '9')) {
+				j++
+			}
+			if j < len(line) && line[j] == 'm' {
+				b.WriteString(line[i : j+1])
+				i = j + 1
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(line[i:])
+		switch {
+		case r == utf8.RuneError && size <= 1:
+		case r == '\t' || r == '\n' || r == '\r':
+			b.WriteByte(' ')
+		case !unicode.IsControl(r) && r != 0x2028 && r != 0x2029:
+			b.WriteString(line[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// runeWidth is how many terminal columns r takes: 2 for wide East Asian
+// characters and most emoji, 0 for combining marks, 1 otherwise. A cheap
+// table, enough to keep CJK titles and emoji from breaking a pane's layout.
+func runeWidth(r rune) int {
+	switch {
+	case r == 0 || r == 0x200B || r == 0x200C || r == 0x200D || r == 0xFE0F || r == 0xFE0E:
+		return 0
+	case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r):
+		return 0
+	case r < 0x1100:
+		return 1
+	case r <= 0x115F, // Hangul Jamo
+		r >= 0x2E80 && r <= 0x303E, r >= 0x3041 && r <= 0x33FF, // CJK radicals, kana, symbols
+		r >= 0x3400 && r <= 0x4DBF, r >= 0x4E00 && r <= 0x9FFF, // CJK ideographs
+		r >= 0xA000 && r <= 0xA4CF, r >= 0xAC00 && r <= 0xD7A3, // Yi, Hangul
+		r >= 0xF900 && r <= 0xFAFF, r >= 0xFE30 && r <= 0xFE4F, // compatibility ideographs and forms
+		r >= 0xFF00 && r <= 0xFF60, r >= 0xFFE0 && r <= 0xFFE6, // fullwidth forms
+		r >= 0x1F300 && r <= 0x1F64F, r >= 0x1F680 && r <= 0x1F6FF, // emoji, transport
+		r >= 0x1F900 && r <= 0x1F9FF, r >= 0x1FA70 && r <= 0x1FAFF, // more emoji
+		r >= 0x20000 && r <= 0x3FFFD: // CJK extensions
+		return 2
+	}
+	return 1
+}
+
+// safeLines joins a pane's lines for drawing, each passed through termSafe.
+func safeLines(lines []string) string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = termSafe(l)
+	}
+	return strings.Join(out, "\r\n")
+}
+
+// paneSignals end a pane cleanly (screen and terminal restored). SIGQUIT
+// (ctrl-\) is among them: Go's default for it exits without restoring.
+var paneSignals = []os.Signal{syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}
+
+// textWidth is how many columns s takes on screen.
+func textWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeWidth(r)
+	}
+	return n
 }
 
 // report shows a background command's last line without ever blocking (the

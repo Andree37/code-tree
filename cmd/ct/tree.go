@@ -481,6 +481,9 @@ func (g *Graph) resolve(q string) string {
 	if _, ok := g.Nodes[q]; ok {
 		return q
 	}
+	if os.Getenv("CT_EXACT_ID") == "1" { // set by the page and panes: they name whole ids
+		die("no node '%s'", q)
+	}
 	var hits []string
 	for _, i := range g.IDs {
 		if strings.HasPrefix(i, q) {
