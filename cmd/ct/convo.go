@@ -1164,3 +1164,39 @@ func helperEnv(extra ...string) []string {
 	}
 	return append(append(env, "CT_SKIP=1", "IC_SKIP=1"), extra...)
 }
+
+// cmdWhere prints one tab-separated line per session it knows:
+//
+//	session  package  card  waiting-for-you  open
+//
+// card is the title of the point Claude is on; the counts cover the whole
+// package tree. herdr-views calls it every few seconds for the sidebar, so it
+// reads only what it needs and stays quiet about sessions without a tree.
+func cmdWhere(a *Args) {
+	for _, id := range a.Pos {
+		if id == "" || id == "." || id == ".." || filepath.Base(id) != id {
+			continue
+		}
+		st := readConvo(id)
+		tree := st["tree"]
+		if tree == "" {
+			continue
+		}
+		g := load(tree)
+		card := ""
+		if n := g.Nodes[st["current"]]; n != nil {
+			card = n.Title
+		}
+		you, open := 0, 0
+		for _, f := range g.Info {
+			switch {
+			case f.Kind == "head":
+			case f.State == "needs-you":
+				you++
+			case !resolved(f.State) && f.State != "ready":
+				open++
+			}
+		}
+		fmt.Printf("%s\t%s\t%s\t%d\t%d\n", id, oneLine(pkgName(st["repo"], st["package"])), oneLine(card), you, open)
+	}
+}
