@@ -251,9 +251,14 @@ func runSelf(tree string, args []string) (string, error) {
 	if err != nil {
 		return err.Error(), err
 	}
+	if abs, err := filepath.Abs(tree); err == nil { // the child runs in another folder: a relative tree would point elsewhere
+		tree = abs
+	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(tree)
-	cmd.Env = append(os.Environ(), "CT_TREE="+tree, "CT_AGENT=", "CLAUDECODE=", "IC_ID=") // the page acts as the human
+	// the page and panes act as the human, and only on the exact node shown:
+	// CT_EXACT_ID turns off prefix matching, so a deleted id never lands on a neighbour
+	cmd.Env = append(os.Environ(), "CT_TREE="+tree, "CT_AGENT=", "CLAUDECODE=", "IC_ID=", "CT_EXACT_ID=1")
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
